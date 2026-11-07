@@ -296,6 +296,8 @@ One row per profile; the notes are each profile's `README.md`.
 | `shader_key_skip` | `<offset>+<length>` (none by default): control-section bytes every shader key hashes as zeros, in `shader_split.py` (`key_ctl`) and the host (`hle_nvn.c` `keys_hash`), for an engine that shares one control section among shaders that differ only there. Batman: Arkham Knight: `0x770+0x78`, GLSLC's compile information (+0x778..+0x791 and +0x7d0..+0x7e7); without it the game asks for shaders the map does not have, each the control section of one record with the code area of another. It must stay clear of `+0x700..+0x75f`, which the tools read; it is a shader chain input, as every `shader_*` key |
 | `shader_groups`, `shader_note` | `shader_split.py` source groups and the map header note (Engage: `engine` for `data.unity3d` and `Resources/`, `assets` for the Addressables bundles). Both are shader inputs, the note too: changing either one, even by a word, builds every shader of the game again. Keep them as they are when a provisional profile moves into `dm/games` |
 
+Pokémon Legends: Z-A 2.0.2 also uses the build-gated `FRAME_STEP` hook described under `fps_target` above.
+
 ### What the game files decide at every build
 
 These are not profile keys: the tools read them from the game files each time, by rules checked against every profile (`dm/games/profile_guess.py` `shader_sources`).
