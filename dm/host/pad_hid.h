@@ -103,10 +103,12 @@ static int pad_hid_hat(long v, long min, long max) { return v >= min && v <= max
 // One stick: a round dead zone against drift (PAD_HID_DEAD of full deflection), and past it the deflection scaled back to start at 0, so the stick neither jumps to the dead zone's
 // edge nor loses a small x while y is deflected. Each axis is clamped after the scale: a square-gated stick still reaches full x and y in its corners.
 #define PAD_HID_DEAD 0.12f
-static void pad_hid_stick(float x, float y, int32_t *ox, int32_t *oy) {
+// The 0x3F PowerA stick held at full tilt returns 91–97% of its peak, not the peak on every sample.
+#define PAD_HID_RAW_OUTER 0.9f
+static void pad_hid_stick(float x, float y, float outer, int32_t *ox, int32_t *oy) {
     float r = sqrtf(x * x + y * y);
     if (r <= PAD_HID_DEAD) { *ox = *oy = 0; return; }
-    float k = (r - PAD_HID_DEAD) / (1 - PAD_HID_DEAD) / r; x *= k; y *= k;
+    float k = (r - PAD_HID_DEAD) / (outer - PAD_HID_DEAD) / r; x *= k; y *= k;
     *ox = (int32_t)((x < -1 ? -1 : x > 1 ? 1 : x) * DM_STICK_MAX); *oy = (int32_t)((y < -1 ? -1 : y > 1 ? 1 : y) * DM_STICK_MAX);
 }
 
@@ -133,7 +135,7 @@ static uint64_t pad_hid_buttons(const pad_hid *h) {
     return m;
 }
 static void pad_hid_sticks(const pad_hid *h, int32_t s[4]) {   // lx, ly, rx, ry; HID's Y grows downward, the Switch's upward
-    int z = h->has[PH_Z];
-    pad_hid_stick(h->axis[PH_X], -h->axis[PH_Y], &s[0], &s[1]);
-    pad_hid_stick(h->axis[z ? PH_Z : PH_RX], -h->axis[z ? PH_RZ : PH_RY], &s[2], &s[3]);
+    int z = h->has[PH_Z]; float outer = h->layout == PAD_HID_NINTENDO ? PAD_HID_RAW_OUTER : 1;
+    pad_hid_stick(h->axis[PH_X], -h->axis[PH_Y], outer, &s[0], &s[1]);
+    pad_hid_stick(h->axis[z ? PH_Z : PH_RX], -h->axis[z ? PH_RZ : PH_RY], outer, &s[2], &s[3]);
 }

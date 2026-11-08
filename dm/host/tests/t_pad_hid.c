@@ -38,7 +38,11 @@ int main(void) {
     CHECK(fabsf(pad_hid_raw_axis(&h, PH_X, -0.78f) + 1) < 1e-5f);            // full on both sides, though the rest is off centre
     CHECK(fabsf(pad_hid_raw_axis(&h, PH_X, -0.08f)) < 1e-6f);
     CHECK(pad_hid_raw_axis(&h, PH_Y, 0.9f) == 1 && h.rest[PH_Y] == 0);       // held while connecting: not a rest
+    h.axis[PH_Y] = -0.91f; pad_hid_sticks(&h, s);
+    CHECK(s[0] == 0 && s[1] == DM_STICK_MAX);
+    h.axis[PH_Y] = -0.5f; pad_hid_sticks(&h, s); CHECK(s[1] > DM_STICK_MAX / 3 && s[1] < DM_STICK_MAX * 2 / 3);
     pad_hid_init(&h, NULL, PAD_HID_DEFAULT); CHECK(h.layout == PAD_HID_DEFAULT);
+    h.axis[PH_Y] = -0.91f; pad_hid_sticks(&h, s); CHECK(s[0] == 0 && s[1] < DM_STICK_MAX);
     // Nintendo's descriptor, by its reports: buttons in 0x3F, the replies 0x21, the full report 0x30 and the subcommand output 0x01 make the protocol; 0x10 is the rumble
     { int bits = pad_hid_nin_bit(0, 0x3F, 9) | pad_hid_nin_bit(0, 0x21, 0xFF00) | pad_hid_nin_bit(0, 0x30, 0xFF00) | pad_hid_nin_bit(1, 0x01, 0xFF00);
       CHECK(pad_hid_nin_protocol(bits) && !(bits & PAD_NIN_RUMBLE) && pad_hid_nin_bit(1, 0x10, 0xFF00) == PAD_NIN_RUMBLE);
