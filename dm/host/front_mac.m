@@ -405,7 +405,9 @@ static void hidpad_motion(hid_pad *d, const float acc[3], const float rot[3], ui
     dm_motion_set_hid(p, acc, rot, ns);
 }
 static void hidpad_models_changed(void) { pads_changed(nil); }
+static void hidpad_quit_changed(void) { if (g_input_on) hq_poll(); }
 static void hidpad_detach(hid_pad *d) {   // d is already off g_hidpads
+    if (hidpad_quit_buttons(d)) hidpad_quit_changed();
     if (g_merge) {   // as pads_changed: released when the last controller goes away
         LOG("controller '%s' (HID) disconnected", d->name);
         int rumbles = 0; for (hid_pad *o = g_hidpads; o; o = o->next) rumbles |= hidpad_rumbles(o);
@@ -542,6 +544,10 @@ static void hq_buttons(int *home, int *a, int *b, GCController **holder) {
     }
     for (s2_pad *d = dm_switch2_pads(); d; d = d->next) { if (s2_pad_home(&d->st)) *home = 1; s2_pad_ab(&d->st, a, b); }   // Switch 2 controllers: no GCController, so no holder (the prompt shows the default A / B symbols)
     for (jc1_pad *d = g_jc1_pads; d; d = d->next) { if (jc1_pad_home(d)) *home = 1; jc1_pad_ab(d, a, b); }   // original Joy-Cons read from HID (pad_jc1_mac.h)
+    for (hid_pad *d = g_hidpads; d; d = d->next) {
+        uint32_t q = hidpad_quit_buttons(d);
+        *home |= !!(q & HIDPAD_QUIT_HOME); *a |= !!(q & HIDPAD_QUIT_A); *b |= !!(q & HIDPAD_QUIT_B);
+    }
 }
 static void hq_fade(NSView *v, int in) {
     if (!v) return;

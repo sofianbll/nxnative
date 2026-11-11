@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "../dm_input.h"
+#include "../home_quit.h"
 
 @interface TestDev : NSObject
 @property int vid, pid; @property long loc; @property uint64_t entry; @property NSString *transport;
@@ -133,6 +134,14 @@ static void hidpad_detach(hid_pad *d) { (void)d; attached--; }
 static int reads;
 static uint64_t buttons;
 static void hidpad_read(hid_pad *d) { reads++; buttons = pad_hid_buttons(&d->st); }
+static home_quit quit_state;
+static double quit_now;
+static int quit_polls;
+static void hidpad_quit_changed(void) {
+    uint32_t q = 0; for (hid_pad *d = g_hidpads; d; d = d->next) q |= hidpad_quit_buttons(d);
+    quit_polls++;
+    hq_step(&quit_state, quit_now, !!(q & HIDPAD_QUIT_HOME), !!(q & HIDPAD_QUIT_A), !!(q & HIDPAD_QUIT_B));
+}
 static int motion_samples;
 static float motion_acc[3], motion_rot[3];
 static uint64_t motion_ns;
@@ -369,11 +378,22 @@ int main(void) { @autoreleasepool {
     TestDev *simple = [TestDev new]; simple.name = @"Pad"; simple.entry = 32; simple.elements = @[elem(0, 0x3F, 9, 1)];
     hidpad_found(NULL, kIOReturnSuccess, NULL, ref(simple)); n = find(simple);
     assert(n && !n->proto && n->st.layout == PAD_HID_NINTENDO && n->st.map[2] == 4 && nouts == base);
+    pad_hid_init(&n->st, "A=1,B=2", PAD_HID_NINTENDO);
+    TestElem *home = elem(0, 0x3F, 9, 13), *a = elem(0, 0x3F, 9, 2), *b = elem(0, 0x3F, 9, 1);
+    push_value(simple, home, 1); assert(quit_state.phase == HQ_HOLDING);
+    quit_now += HQ_HOLD_S; hidpad_quit_changed(); assert(quit_state.phase == HQ_PROMPT);
+    push_value(simple, home, 0); push_value(simple, b, 1); assert(quit_state.phase == HQ_SETTLE);
+    push_value(simple, b, 0); assert(quit_state.phase == HQ_IDLE);
+    push_value(simple, home, 1);
+    quit_now += HQ_HOLD_S; hidpad_quit_changed(); assert(quit_state.phase == HQ_PROMPT);
+    push_value(simple, home, 0); push_value(simple, a, 1); assert(quit_state.phase == HQ_QUIT && buttons == DM_BTN_B);
+    puts("Nintendo 0x3F: Home hold and positional confirm/cancel with guest remapping: OK");
     hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(simple));
     // an 8BitDo (buttons in report 1): its own numbering, untouched
     TestDev *ebd = [TestDev new]; ebd.vid = PAD_HID_DEFAULT_VENDOR; ebd.name = @"8BitDo"; ebd.entry = 33; ebd.elements = @[elem(0, 1, 9, 1), elem(1, 1, 0xFF00, 1)];
     hidpad_found(NULL, kIOReturnSuccess, NULL, ref(ebd)); n = find(ebd);
     assert(n && !(n->nin & PAD_NIN_SIMPLE) && !n->proto && n->st.layout == PAD_HID_DEFAULT && n->st.map[2] == 5 && nouts == base);
+    int polls = quit_polls; push_value(ebd, elem(0, 1, 9, 13), 1); assert(quit_polls == polls);
     hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(ebd));
     // Lights are independent of full input mode: the subcommand channel alone shows its player, with no device-info handshake.
     TestDev *led = [TestDev new]; led.name = @"LED pad"; led.entry = 35;

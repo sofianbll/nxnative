@@ -60,6 +60,7 @@ static int g_hidpad_log, g_hidpad_motion = 1, g_twins_off, g_twins_due, g_twins_
 static void hidpad_attach(hid_pad *d);
 static void hidpad_detach(hid_pad *d);
 static void hidpad_read(hid_pad *d);
+static void hidpad_quit_changed(void);
 static void hidpad_motion(hid_pad *d, const float acc[3], const float rot[3], uint64_t ns);
 static void hidpad_models_changed(void);   // the pads of a model changed: front_mac.m runs hidpad_twins_eval / _release / _take again
 static int hidpad_player(const hid_pad *d);   // front_mac.m: its player, -1 before it joins
@@ -67,6 +68,11 @@ static int hidpad_player(const hid_pad *d);   // front_mac.m: its player, -1 bef
 static int hidpad_is_pro(const hid_pad *d) { return d->vid == 0x057e && d->pid == 0x2009; }
 // Whether its buttons and sticks come from report 0x30 (pro_m, pro_s) rather than its elements (st): a twin Pro Controller, or a pad of Nintendo's protocol in full mode
 static int hidpad_full(const hid_pad *d) { return (d->twin && hidpad_is_pro(d)) || d->full; }
+// Report 0x3F's positional A (right), B (bottom) and Home, independent of DM_HID_MAP.
+enum { HIDPAD_QUIT_A = 1u << 1, HIDPAD_QUIT_B = 1u << 0, HIDPAD_QUIT_HOME = 1u << 12 };
+static uint32_t hidpad_quit_buttons(const hid_pad *d) {
+    return d->st.layout == PAD_HID_NINTENDO && !hidpad_full(d) ? d->st.buttons & (HIDPAD_QUIT_A | HIDPAD_QUIT_B | HIDPAD_QUIT_HOME) : 0;
+}
 static void hidpad_value(void *ctx, IOReturn result, void *sender, IOHIDValueRef v) {
     (void)sender;
     hid_pad *d = ctx; if (result != kIOReturnSuccess || d->full) return;   // full: report 0x3F's elements are not sent any more
@@ -74,9 +80,11 @@ static void hidpad_value(void *ctx, IOReturn result, void *sender, IOHIDValueRef
     uint32_t page = IOHIDElementGetUsagePage(e), usage = IOHIDElementGetUsage(e);
     CFIndex x = IOHIDValueGetIntegerValue(v), min = IOHIDElementGetLogicalMin(e), max = IOHIDElementGetLogicalMax(e);
     if (page == kHIDPage_Button && usage >= 1 && usage <= 32) {
+        uint32_t quit = hidpad_quit_buttons(d);
         uint32_t bit = 1u << (usage - 1), was = d->st.buttons & bit;
         d->st.buttons = x ? d->st.buttons | bit : d->st.buttons & ~bit;
         if (g_hidpad_log && x && !was) LOG("[hid] %s: button usage %u", d->name, usage);
+        if (quit != hidpad_quit_buttons(d)) hidpad_quit_changed();
     } else if (page == kHIDPage_GenericDesktop && usage == kHIDUsage_GD_Hatswitch) {
         d->st.hat = pad_hid_hat(x, min, max);
     } else {
@@ -241,7 +249,10 @@ static void hidpad_report(void *ctx, IOReturn result, void *sender, IOHIDReportT
             return;
         }
         if (r[0] == 0x30 && !d->full && n >= JC1_REPORT_LEN) {
+            uint32_t quit = hidpad_quit_buttons(d);
             d->full = 1;   // d->pro keeps the calibration it answered, else measures itself from this report on (pad_pro_decode)
+            d->st.buttons &= ~quit;   // a later return to 0x3F must see fresh values, not its last Home/A/B
+            if (quit) hidpad_quit_changed();
             LOG("controller '%s' (HID): in full mode: read from its report 0x30 (buttons, sticks by its %s, motion%s)", d->name,
                 d->pro.cal[0] || d->pro.cal[1] ? "calibration" : "own reach", d->nin & PAD_NIN_RUMBLE ? ", rumble" : "");
         }
