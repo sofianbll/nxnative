@@ -1,6 +1,7 @@
 // Multi-module loading (playing the role of Horizon's rtld): mapping, claiming thread slots, gate registration, cross-module relocation, take-over by name, segment permissions.
 // The code area (original text and patch area) is set to read-only+execute as soon as it is copied in, and from then on the loader only writes data: on iOS these two blocks must be embedded as is as signed code segments.
 #include "dm.h"
+#include "mods.h"
 #include <TargetConditionals.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -903,24 +904,31 @@ const char *dm_module_dir(void) { return g_module_dir; }
 
 void load_modules(const char *dir, const char **names, int n) {
     strlcpy(g_module_dir, dir, sizeof g_module_dir);
+    // The Mac app carries a second copy of modules changed by code mods. DM_MODS_OFF switches them together; iOS has no such copy in this subset.
+    int want = TARGET_OS_IPHONE ? 0 : dm_mods_code_wanted(); char cdir[1100]; snprintf(cdir, sizeof cdir, "%s/codemods", dir);
     // Map everything and parse the symbol tables first, then relocate all at once (cross-module symbols must all be in place first)
     // DM_BOOTPROF: breakdown of ① host loading (milliseconds), to set the upper bound for ③ pre-relocation / mmap
     uint64_t t0 = now_ns(), tm = 0, tp = 0, tg = 0, tr = 0, t;
     FILE *nros = open_nros(dir);
     allocate_modules(n, nros);
+    const char *mdir[n]; int code_loaded = 0;
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
         strlcpy(m->name, names[i], sizeof m->name);
-        read_layout(m, dir);
+        char t[1200]; snprintf(t, sizeof t, "%s/%s.fixups.tsv", cdir, m->name);
+        m->code_mods = want && !access(t, F_OK); mdir[i] = m->code_mods ? cdir : dir;
+        if (m->code_mods) { code_loaded = 1; LOG("%s: the copy with the mods' code patches (%s)", m->name, cdir); if (!strcmp(m->name, "main")) strlcpy(g_module_dir, cdir, sizeof g_module_dir); }
+        read_layout(m, mdir[i]);
     }
+    if (want && !code_loaded) LOG("[RED] mods: code patches are on, but this build has no codemods copy (%s): the game runs its own code", cdir);
     create_keys();
     jit_layout_init();
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
-        t = now_ns(); map_image(m, dir); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
+        t = now_ns(); map_image(m, mdir[i]); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
         if (!i) tsd_check();
         t = now_ns(); parse_dynamic(m); tp += now_ns() - t;
-        t = now_ns(); register_gates(m, dir); tg += now_ns() - t;
+        t = now_ns(); register_gates(m, mdir[i]); tg += now_ns() - t;
         LOG("%s: base %p size %#zx", names[i], m->base, m->size);
         m->loaded = 1; g_loaded[g_nloaded++] = m; g_nmod++;
     }

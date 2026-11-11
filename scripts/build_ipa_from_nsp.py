@@ -73,6 +73,7 @@ LANGUAGE = ''                           # game language, a code or a name: 'ja',
                                         #   DM_LANG=<code> in the app's Documents/env.txt changes it without a rebuild
 KEEP_EXTRACTED = True                   # keep the extracted game files after the IPA is built (saves extraction next time; as big as the game files); False deletes them
 DM_ENV_FILE = ''                        # optional: environment switches for a diagnostic build (one KEY=VALUE per line)
+MODS = []                               # Mac builds: folders of code mods (exefs/ .pchtxt or .ips); RomFS remains the front end's DM_ROMFS_OVERLAY
 SEEN_SHADERS = False                    # PLATFORM 'mac' / 'mac-app': build only the shaders the profile's playtests used (shader_seen.tsv) and those the last runs' logs reported missing, not the whole map; areas the list does not cover draw without the rest until this runs again
 PREBAKE = True                          # PLATFORM 'mac-app', NVN games: also make the prewarm list's pipelines here, on this Mac (the host's prebuild tool, DM_PSO_PREBUILD=tool), and bundle them with the app after the pipeline archive,
                                         #   so the app's first start builds none (Ocarina of Time, 40,000-line list: about 6,400 bases, 450-475 s on an M5 Max); minutes to hours when its inputs changed, about 1.3 GB more app for that game; False = the app builds them on its first start
@@ -1599,8 +1600,10 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
     # the repository profile's build rows decide which builds the rewriter treats as the game's own (SDK-wide function patches skip those), and its snowdrop_pools the sizes of those cuts, so they are inputs too
     try: own = [l for l in (repo / 'dm/games' / Path(env.get('DM_GAME') or '-').name / 'game.tsv').read_text(encoding='utf-8').splitlines() if l.startswith(('build\t', 'snowdrop_pools\t'))]
     except OSError: own = []
-    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_syms.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'ue_ring.py', 'snowdrop_pools.py', 'loader_census.py', 'fps_target.py', 'monolith_fps.py', 'ue_fixed_rate.py', 'unity_fps.py', 'unity_bucket.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else [])), names, capstone.__version__,
-                      {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME')}, own)
+    code_patches = env.get('DM_EXEFS_PATCHES', '')
+    mod_inputs = [repo / 'dm/tools/exefs_mods.py', *map(Path, filter(None, code_patches.split(':')))] if code_patches else []
+    key = fingerprint(('files', [repo / 'dm/tools' / f for f in ('patch_nso.py', 'nso.py', 'nso_code.py', 'nso_asm.py', 'nso_syms.py', 'nso_match.py', 'ue_cvar.py', 'ue_malloc.py', 'ue_region.py', 'ue_ring.py', 'snowdrop_pools.py', 'loader_census.py', 'fps_target.py', 'monolith_fps.py', 'ue_fixed_rate.py', 'unity_fps.py', 'unity_bucket.py')] + patch_files(repo, exe_dir, mods, env.get('DM_GAME')) + list(src.values()) + ([manifest] if manifest.is_file() else []) + mod_inputs), names, capstone.__version__,
+                      {k: env.get(k) for k in ('DM_PATCH_FRONT', 'DM_GAME', 'DM_EXEFS_PATCHES')}, own)
     if all((out / f'{m}.patched.bin').is_file() for m in names) and reused(kf, key) is not None:
         PROG.end(f'{", ".join(mods)}{f" and {len(nros)} NROs" if nros else ""}, reused (inputs unchanged)')
         return capture_nro(py, repo, exe_dir, out, nro_dir, env, logs, g, provisional)
@@ -3035,7 +3038,7 @@ def mac_app_name(name):   # the app's file name: the game name with the characte
     return re.sub(r'\s*[:/]\s*', ' - ', name).strip(' .-') or 'nxnative'
 
 
-def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', programs=None, control=None, prebake=False):
+def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', programs=None, control=None, prebake=False, mods_dir=None):
     """The last stage of PLATFORM 'mac-app': pack the Mac app (dm/mac/pack_app.py) from what a Mac-only build made: the Mac host and font (mac_host), the packed version's RomFS and rewritten
     modules, the Mac shader libraries (msl: <shader>/cache, whose b-<chain> goes in, or a Vulkan or GL game's <shader>, whose vk / gl goes in), the DLC, the profile's tables (with the shader pairs
     the pipeline prebuild reads), the pipeline archive made offline for this Mac (mac_pso; gpus: --gpu / PSO_GPUS), the launcher settings and an environment file.
@@ -3056,7 +3059,7 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
     for opt, v in (('--version', version), ('--category', g.get('app_category')), ('--marker', g.get('romfs_marker')), ('--aoc', aoc), ('--icon', icon),
                    ('--pso', pso), ('--pso-pairs', split_pairs if gfx == 'nvn' and not g.table('pso_pairs.tsv').is_file() and split_pairs.is_file() else None),
                    ('--env-file', Path(os.path.expanduser(env_file)).resolve() if env_file else None), ('--settings', settings),
-                   ('--control-nacp', next((p for p in (control, game / 'control.nacp') if p and Path(p).is_file()), None))):
+                   ('--control-nacp', next((p for p in (control, game / 'control.nacp') if p and Path(p).is_file()), None)), ('--game-mods', mods_dir)):
         if v: cmd += [opt, v]
     for n, r in (programs or {}).items(): cmd += ['--program', f'{n}\t{r["patched"]}\t{r["romfs"]}\t{r["msl"]}\t{r["tables"]}\t{r["html"]}']
     if (game / 'html').is_dir(): cmd += ['--html', game / 'html']
@@ -3068,6 +3071,66 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
     run(cmd, logs / 'mac_app.log', env=env, on_line=line)
     if not (out / 'Contents/MacOS/dmhost').is_file(): raise BuildError(f'no app at {out}')
     PROG.end(f'{out.name}, ' + ('reused (inputs unchanged)' if unchanged else amount(tree_size(out)[1], 'B')))
+
+
+def mod_folders(args):   # --mods (repeatable, comma-separated) or the MODS setting
+    got = [x.strip() for v in (getattr(args, 'mods', None) or []) for x in v.split(',') if x.strip()] or [str(x).strip() for x in (MODS.split(',') if isinstance(MODS, str) else MODS) if str(x).strip()]
+    return [Path(os.path.expanduser(x)).resolve() for x in got]
+
+
+def prepare_mods(repo, folders, app, env):
+    """Find code mods before the rewrite. Their patch files go to patch_nso.py in DM_EXEFS_PATCHES; replacement modules are not supported."""
+    if not folders: return []
+    sys.path.insert(0, str(repo / 'dm/tools')); import mods as modlib
+    found = []
+    for f in folders:
+        try: got = modlib.find(f, f'{app:016X}')
+        except FileNotFoundError as e: raise BuildError(f'--mods: {e}') from None
+        got = [m for m in got if m.patches or m.other]   # an Atmosphère tree's RomFS-only half stays with the front end
+        if not got: raise BuildError(f'--mods: no code mod in {f} (expected exefs/ .pchtxt or .ips for title {app:016X})')
+        found += got
+    names = [m.name for m in found]
+    for n in names:
+        if names.count(n) > 1: raise BuildError(f'--mods: two mods named {n!r}: {", ".join(str(m.dir) for m in found if m.name == n)}')
+        if ':' in n: raise BuildError(f'--mods: the mod name {n!r} has a ":", which separates code patch paths: rename its folder')
+    for m in found:
+        if m.other: raise BuildError(f'--mods: {m.name} replaces code modules ({", ".join(p.name for p in m.other[:4])}): only code patches (.pchtxt, .ips) are supported')
+        if not m.patches: raise BuildError(f'--mods: {m.name} has no code patches (.pchtxt, .ips); leave RomFS-only mods to the front end')
+        if any(any(c in str(p) for c in ':\t\n\r') for p in m.patches):
+            raise BuildError(f'--mods: {m.name} has a patch path containing a path-list or TSV separator')
+        say(f'mod: {m.name} ({m.dir}): {len(m.patches)} code patch files')
+    return found
+
+
+def rewrite_code_mods(py, repo, exe_dir, patched, env, logs, g, found, provisional):
+    """Rewrite changed modules a second time with DM_EXEFS_PATCHES, then copy those modules into <patched>/codemods for the Mac loader."""
+    out, dst = patched.with_name(patched.name + '_codemods'), patched / 'codemods'
+    rmtree(dst)
+    patches = [str(p) for m in found for p in m.patches]
+    if not patches: rmtree(out); return out
+    PROG.add(1); rewrite(py, repo, exe_dir, out, dict(env, DM_EXEFS_PATCHES=':'.join(patches)), logs, g, provisional)
+    changed = sorted(t.name.removesuffix('.mods.tsv') for t in out.glob('*.mods.tsv'))
+    if set(changed) - set(g.modules_in(exe_dir)):
+        raise BuildError('--mods: code patches for dynamically loaded NROs are not supported')
+    dst.mkdir()
+    for name in changed:
+        for f in out.glob(f'{name}.*'):
+            if subprocess.run(['cp', '-c', str(f), str(dst / f.name)], capture_output=True).returncode: shutil.copy2(f, dst / f.name)
+    say(f'mods: code patches in a second copy of {", ".join(changed) or "no module"} ({dst}), loaded while all code mods are on')
+    return out
+
+
+def finish_mods(repo, found, patched, work):
+    """Stop when a code mod fits no module, then stage only its dm_code.tsv switch metadata, never its RomFS."""
+    out = work / 'mods'
+    if not found: rmtree(out); return None
+    import mods as modlib
+    applied = modlib.applied_files(patched.with_name(patched.name + '_codemods'))
+    for m in found:
+        if not any(str(p) in applied for p in m.patches):
+            raise BuildError(f'--mods: none of {m.name}\'s code patches fit this version of the game ({", ".join(p.name for p in m.patches[:4])}{"…" if len(m.patches) > 4 else ""}): it is made for another version')
+    for name, ncode in modlib.stage(found, applied, out): say(f'mod: {name}: code patches from {ncode} files, switched with the other code mods')
+    return out
 
 
 def find_repo(here):   # this file lives in the repository's scripts/; walk up to the level that has dm/tools/nx_extract/Program.cs
@@ -3108,6 +3171,8 @@ def parse_args(argv):
     ap.add_argument('--keep-extracted', action=argparse.BooleanOptionalAction, help='keep the extracted game files after the IPA is built, for the next build (default: the KEEP_EXTRACTED setting, on)')
     ap.add_argument('--work-dir', help='the game\'s build folder, used as it is (default: the WORK_DIR setting, else <title ID>_build in the NSP folder); the extracted files, shader cache and temporary files live there, and the IPA or Mac app defaults to the folder holding it')
     ap.add_argument('--env-file', help='environment switches for a diagnostic build (one KEY=VALUE per line)')
+    ap.add_argument('--mods', action='append', metavar='FOLDER', help='--platform mac / mac-app: code mods to build in, a mod folder (exefs/ .pchtxt or .ips) or a folder of mods; repeat it or separate folders with commas. '
+                    'The app carries original and patched modules, switched together through DM_MODS_OFF. RomFS is not staged: the front end keeps applying it through DM_ROMFS_OVERLAY')
     ap.add_argument('--gpu', help='NVN games: GPU architectures the app gets its pipeline archive for, made on this Mac with metal-tt, comma-separated: g18p (A19 / A19 Pro), or the name a device\'s log gives when the app has no archive for its GPU; '
                     'none = no archive, the device builds the bases on its first start (default: the PSO_GPUS setting; when that is empty, a profile with pso_mtl4 on uses its pso_gpu key or g18p, and other profiles use none). '
                     'With --platform mac-app: the Mac app\'s archive, by default for this Mac\'s GPU (none: the app builds the bases on its first start)')
@@ -3238,6 +3303,8 @@ def main(args=None):
     if platform not in ('ios', 'mac', 'mac-app'): raise BuildError(f'PLATFORM / --platform must be ios, mac or mac-app: {platform}')
     mac = platform in ('mac', 'mac-app')   # the Mac's shaders and host only: no iOS shaders, Xcode project or IPA (mac_run prints the command; mac-app packs a Mac app, mac_app)
     mac_pack = platform == 'mac-app'
+    mod_roots = mod_folders(args)
+    if mod_roots and not mac: raise BuildError('--mods builds switchable code mods for --platform mac / mac-app only in this carry; iOS embedding is not included')
     seen_shaders = SEEN_SHADERS if args.seen_shaders is None else args.seen_shaders
     if seen_shaders and not mac: raise BuildError('--seen-shaders / SEEN_SHADERS builds a partial library of Mac shaders: it needs --platform mac or mac-app')
     if args.mac_sign and not mac_pack: raise BuildError('--mac-sign signs the Mac app: it needs --platform mac-app')
@@ -3431,7 +3498,15 @@ def main(args=None):
         + (f'; the game\'s languages: {" ".join(have)}' if have else '; the control data lists no languages (not checked)') + (' (DM_LANG=<code> in the run command changes it)' if mac else ' (DM_LANG=<code> in the app\'s Documents/env.txt changes it)'))
 
     patched = work / f'patched_{pkg_ver}'
+    if mod_roots and g.get('programs', '') and not PROGRAM_INDEX:
+        raise BuildError('--mods requires a single program; select one with --program')
+    game_mods = prepare_mods(repo, mod_roots, app, env)
+    env.pop('DM_EXEFS_PATCHES', None)   # only the secondary rewrite may patch the original modules
     g = rewrite(py, repo, game / 'ExeFS', patched, env, logs, g, provisional)
+    mods_dir = None
+    if mac:
+        rewrite_code_mods(py, repo, game / 'ExeFS', patched, env, logs, g, game_mods, provisional)
+        mods_dir = finish_mods(repo, game_mods, patched, work)
     if nd := captured_nros(patched): env = dict(env, DM_NRO_DIR=str(nd))
     chain_header(py, repo, env, logs)   # before any host is built
     if provisional or derived:   # (provisional) the heap check, then the region check (both only change keys the host is built with, not the rewrite or the shader steps)
@@ -3484,7 +3559,7 @@ def main(args=None):
         programs = other_programs(args, g)
         if not icon: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the app\'s icon will be blank; --icon / ICON or --fallback-icon / FALLBACK_ICON gives it one' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
         mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
-                (args.gpu or PSO_GPUS).strip(), programs, control, PREBAKE if args.prebake is None else args.prebake)
+                (args.gpu or PSO_GPUS).strip(), programs, control, PREBAKE if args.prebake is None else args.prebake, mods_dir=mods_dir)
         rmtree(work / 'tmp')
         say(f'done: {out_ipa} ({tree_size(out_ipa)[1] / 2**30:.1f} GB); '
             f'open it from Finder. Its save is in ~/Library/Application Support/nxnative/{app:016X}/, its log in ~/Library/Logs/nxnative/{app:016X}.log')
