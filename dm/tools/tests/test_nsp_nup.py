@@ -196,7 +196,39 @@ class Read(Base):
         self.assertEqual(nsp.nup_file(self.dir), self.path)
         self.assertEqual(nsp.nup_file(self.path), self.path)
         (self.dir / 'game.nsp').write_bytes(b'x')
-        self.assertIsNone(nsp.nup_file(self.dir))   # the packages win, as over a dump's layout
+        self.assertEqual(nsp.nup_file(self.dir), self.path)
+        self.assertEqual(nsp.nup_dlc_packages(self.path), [])   # not a readable package header
+
+    def test_external_dlc_preserves_internal_and_is_extracted_once(self):
+        old, new = (self.dir / name for name in ('old.nsp', 'new.NSP'))
+        for p in (old, new): p.write_bytes(b'PFS0' + bytes(128))
+        external = nsp.nup_dlc_packages(self.path)
+        self.assertCountEqual(external, (old, new))
+        with self.assertRaisesRegex(nsp.BuildError, 'require --keys'):
+            nsp.scan_nup(self.path, external=external)
+        reader = mock.MagicMock()
+        reader.__enter__.return_value.contents.return_value = {
+            old: [('AddOnContent', TID + 0x1001, 99), ('AddOnContent', TID + 0x1002, 0)],
+            new: [('AddOnContent', TID + 0x1002, 1), ('AddOnContent', TID + 0x3001, 0), ('Patch', TID + 0x800, 2)]}
+        with mock.patch.object(nsp, 'package_reader', return_value=reader):
+            app, fam = nsp.scan_nup(self.path, external=external, keys=self.dir / 'synthetic.keys')
+        self.addCleanup(fam['nup'].close)
+        self.assertEqual(app, TID)
+        self.assertEqual([v for v, _ in fam['updates']], [VER])
+        self.assertEqual([tid for tid, _, _ in fam['dlc']], [TID + 0x1001, TID + 0x1002, TID + 0x1002])
+        work = self.dir / 'build'
+        def fake_extract(argv, log, **kw):
+            self.assertEqual(argv[3], new)
+            self.assertEqual(argv[4].name, '2.img')
+            argv[4].write_bytes(b'external')
+        with mock.patch.object(nsp, 'run', side_effect=fake_extract) as run:
+            aoc = nsp.extract_aoc('mock', 'synthetic.keys', REPO, work, app, fam, work / 'logs')
+            self.assertEqual(nsp.extract_aoc('mock', 'synthetic.keys', REPO, work, app, fam, work / 'logs'), aoc)
+        run.assert_called_once()
+        self.assertIn('dlcfile', romfs_image.read_index(aoc / '1.img'))
+        self.assertEqual((aoc / '2.img').read_bytes(), b'external')
+        nsp.extract_aoc(None, None, REPO, work, app, dict(fam, dlc=fam['dlc'][:1]), work / 'logs')
+        self.assertFalse((aoc / '2.img').exists())
 
 
 class Head(Base):

@@ -1372,25 +1372,45 @@ def dump_folder(folder):   # a folder of the game's files (pack_dump.py), with n
     return pack_dump.is_dump(folder) and not files_with_suffix(folder, *PACKAGE_SUFFIXES)
 
 
-def nup_file(path):   # the NUP to pack: path when it is a .nup file, else the one .nup in the folder when no game package is beside it; None when there is none
+def nup_file(path):   # the NUP to pack: an explicit file or the one NUP in the folder; its neighbours can supply DLC only
     if path.is_file():
         if not pack_nup.is_nup(path): raise BuildError(f'not a folder or a NUP file: {path}')
         return path
-    if files_with_suffix(path, *PACKAGE_SUFFIXES): return None
     nups = [p for p in files_with_suffix(path, '.nup') if pack_nup.is_nup(p)]
     if len(nups) > 1: raise BuildError(f'more than one NUP in {path}: {", ".join(p.name for p in nups)}; keep one game per folder, or give the .nup file to pack in place of the folder')
     return nups[0] if nups else None
 
 
-def scan_nup(path, want=None, program=None):
+def nup_dlc_packages(nup):
+    return [p for p in files_with_suffix(nup.parent, '.nsp', '.xci') if is_package(p)]
+
+
+def scan_nup(path, want=None, program=None, *, repo=None, keys=None, env=None, external=()):
     """A NUP as scan_nsps gives a folder of NSPs, with its packages for the NSPs: (title ID, {'base', 'updates', 'dlc', 'nup': the open container}). program: of an application of several
     programs, the index of the one to pack (default: the highest); the title ID is its program ID. want: --title-id, that program's ID or the application's"""
+    n = None
     try:
         n = pack_nup.Nup(path)
         app, base, vers, dlc = pack_nup.scan(n, program)
-    except (pack_nup.Error, OSError) as e: raise BuildError(str(e)) from e
-    if want is not None and want not in (app, n.application): raise BuildError(f'no game {want:016X} (--title-id / TITLE_ID) in {path}, which holds {app:016X}')
-    return app, {'base': base, 'updates': sorted(vers.items()), 'dlc': [(tid, None, k) for tid, k in sorted(dlc.items())], 'nup': n}
+    except (pack_nup.Error, OSError) as e:
+        if n is not None: n.close()
+        raise BuildError(str(e)) from e
+    try:
+        if want is not None and want not in (app, n.application): raise BuildError(f'no game {want:016X} (--title-id / TITLE_ID) in {path}, which holds {app:016X}')
+        add = []
+        if external:
+            if not keys: raise BuildError('external packages beside a NUP require --keys / PROD_KEYS; the NUP itself needs none')
+            with package_reader(repo, keys, env) as reader:
+                for p, metas in reader.contents(external).items():
+                    if isinstance(metas, str):
+                        say(f'[RED] skipping {p.name}: its content meta could not be read: {metas}')
+                        continue
+                    add.extend((tid, ver, p) for kind, tid, ver in metas
+                               if kind == 'AddOnContent' and 0 < tid - n.aoc_base <= 2000 and tid not in dlc)
+        return app, {'base': base, 'updates': sorted(vers.items()), 'dlc': [(tid, None, k) for tid, k in sorted(dlc.items())] + add, 'nup': n}
+    except BaseException:
+        n.close()
+        raise
 
 
 def extract_nup(ex, name, k, base, app, n):   # one version of a NUP (k: its base or an update package) into the layout extract makes; the code modules and the image are kept while unchanged
@@ -1479,9 +1499,12 @@ def extract_aoc(nx, keys, repo, work, app, fam, logs):
     Returns None without DLC. Reused when the DLC NSPs (names, sizes and times) and nx_extract are as at the last extraction (extraction_key) (Monster Hunter Rise: 250 DLC, 30 s),
     and aoc/ holds the files that extraction wrote (names, sizes and times): a NUP or a dump folder packs its DLC into the same aoc/"""
     if not fam['dlc']: return None
-    if fam.get('nup'):
+    nup = fam.get('nup')
+    external = [(tid, ver, p) for tid, ver, p in fam['dlc'] if isinstance(p, Path)] if nup else fam['dlc']
+    internal = {tid: p for tid, _, p in fam['dlc'] if not isinstance(p, Path)} if nup else {}
+    if nup and not external:
         PROG.stage('unpack DLC', step='unpacking')
-        try: pack_nup.pack_dlc(fam['nup'], app, {tid: k for tid, _, k in fam['dlc']}, work / 'aoc', say=lambda s: None)
+        try: pack_nup.pack_dlc(nup, app, internal, work / 'aoc', say=lambda s: None)
         except pack_nup.Error as e: raise BuildError(str(e)) from e
         PROG.end(f'{len(fam["dlc"])} DLC')
         return work / 'aoc'
@@ -1493,25 +1516,30 @@ def extract_aoc(nx, keys, repo, work, app, fam, logs):
         return work / 'aoc'
     tmp, dst = work / 'aoc.partial', work / 'aoc'; rmtree(tmp)
     best = {}   # when one DLC comes in several copies, take the highest version, and the largest of equal versions
-    for tid, ver, p in fam['dlc']:
+    for tid, ver, p in external:
         k = (ver or 0, p.stat().st_size)
         if tid not in best or k > best[tid][0]: best[tid] = (k, p)
     PROG.stage('extract DLC')
     kf = work / 'aoc.key'
     key = extraction_key(repo, 'dlc', [p for _, (_, p) in sorted(best.items())], sorted(best))
     base = app & ~0xFFF   # a program (--program N, or one a launcher's build packs) is app + N: its DLC are numbered from the application, as the game asks for them
-    if base != app: key = fingerprint(key, 'indices from the application')   # a program's aoc/ numbered from its own title ID before is made again
+    first = nup.aoc_base if nup else base + 0x1000
+    if nup: key = fingerprint(key, extraction_key(repo, 'nup-dlc', [nup.path], first, sorted(internal)), ('files', [repo / 'scripts/pack_nup.py']))
+    elif base != app: key = fingerprint(key, 'indices from the application')   # a program's aoc/ numbered from its own title ID before is made again
     if dst.is_dir() and (note := reused(kf, fingerprint(key, ('stat', dst)))) is not None:
         PROG.end(f'{note}, reused (inputs unchanged)'); return dst
     rmtree(kf)
+    if nup:
+        try: pack_nup.pack_dlc(nup, app, internal, tmp, say=lambda s: None)   # cleanup only the staging folder, before extracting external DLC
+        except pack_nup.Error as e: raise BuildError(str(e)) from e
     for i, (tid, (_, p)) in enumerate(sorted(best.items())):
-        idx = tid - base - 0x1000
+        idx = tid - first
         PROG.set(step='extracting', done=i, total=len(best), unit='DLC')
         say(f'DLC index {idx}: {p.name}')
         run([nx, keys, '--aoc', p, tmp / f'{idx}.img', '--romfs-image', f'{tid:016x}'], logs / f'aoc_{idx}.log')   # the DLC by its content meta's title ID: a merged package holds several
     swap_in(tmp, dst)
-    kf.write_text(f'{fingerprint(key, ("stat", dst))}\n{len(best)} DLC\n')
-    PROG.end(f'{len(best)} DLC')
+    kf.write_text(f'{fingerprint(key, ("stat", dst))}\n{len(internal) + len(best)} DLC\n')
+    PROG.end(f'{len(internal) + len(best)} DLC')
     return dst
 
 
@@ -3146,7 +3174,7 @@ def parse_args(argv):
         description='Build an unsigned IPA or prepare an Xcode project from a game\'s NSPs; a game with no profile is surveyed and gets a provisional profile.',
         epilog='example: python3 scripts/build_ipa_from_nsp.py ~/nsp/"Super Mario Bros Wonder" -k ~/keys/prod.keys')
     ap.add_argument('nsp_dir', nargs='?', help='folder holding one game\'s NSPs, or its files as a dump (scripts/pack_dump.py lists the layout), or one NUP container (a .nup file; the file itself may be given) (default: the NSP_DIR setting, else asked)')
-    ap.add_argument('-k', '--keys', help='path of prod.keys, not needed for a dump folder or a NUP (default: the PROD_KEYS setting, else asked)')
+    ap.add_argument('-k', '--keys', help='path of prod.keys, not needed for a dump folder or a NUP without external DLC (default: the PROD_KEYS setting, else asked for NSP builds)')
     ap.add_argument('--title-id', help='the game to pack when the folder holds several (a cartridge dump with two games): its title ID, 16 hex digits (default: the TITLE_ID setting)')
     ap.add_argument('-p', '--package', help='version packed into the IPA, e.g. v327680 / v0 (default: the newest in the folder)')
     ap.add_argument('-o', '--out', help='output IPA, or app with --platform mac-app (default: <the profile\'s ipa>, or <game name>.app, in the NSP folder)')
@@ -3328,7 +3356,9 @@ def main(args=None):
     if nsp_dir.is_file(): nsp_dir = nsp_dir.parent
     global NSP_FOLDER; NSP_FOLDER = nsp_dir
     dump = 'nup' if nup else 'folder' if dump_folder(nsp_dir) else None   # their files are not encrypted, so they need no keys
-    keys = None if dump else Path(os.path.expanduser(args.keys or PROD_KEYS or ask('path of prod.keys: ', 'prod.keys (-k)'))).resolve()
+    external = nup_dlc_packages(nup) if nup else []
+    key_path = (args.keys or PROD_KEYS) if external else '' if dump else args.keys or PROD_KEYS or ask('path of prod.keys: ', 'prod.keys (-k)')
+    keys = Path(os.path.expanduser(key_path)).resolve() if key_path else None
     if keys and not keys.is_file(): raise BuildError(f'no such file: {keys}')
     user_icon = icon_file(args.icon or ICON, '--icon / ICON'); spare_icon = icon_file(args.fallback_icon or FALLBACK_ICON, '--fallback-icon / FALLBACK_ICON')
     sys.path.insert(0, str(repo / 'dm/games')); import game as gamemod   # game profiles
@@ -3345,7 +3375,8 @@ def main(args=None):
     if want and not re.fullmatch(r'[0-9A-Fa-f]{16}', want): raise BuildError(f'--title-id / TITLE_ID takes a title ID, 16 hex digits: {want}')
     if PROGRAM_INDEX and dump == 'folder': raise BuildError('--program / PROGRAM_INDEX picks a program from a multi-program application\'s NSPs or NUP; a dump folder is read as one program\'s files')
     if nup:
-        app, fam = scan_nup(nup, int(want, 16) if want else None, PROGRAM_INDEX if args.program is not None or PROGRAM_INDEX else None)
+        app, fam = scan_nup(nup, int(want, 16) if want else None, PROGRAM_INDEX if args.program is not None or PROGRAM_INDEX else None,
+                            repo=repo, keys=keys, env=env, external=external)
         say(f'a NUP: {nup.name}, {app:016X}, {len(fam["updates"])} update(s), {len(fam["dlc"])} DLC')
         if fam['nup'].siblings:
             say(f'program {app & 0xFFF} of application {fam["nup"].application:016X}; the RomFS of its program(s) '
@@ -3434,7 +3465,7 @@ def main(args=None):
     if free_gb(work) < gb and not all((ex / v).exists() for v in versions): raise BuildError(f'less than {gb:.0f} GB free on the volume of {work}')
     heapck = provisional and HEAP_CHECK and not args.no_heap_check and not heap_checked(g)   # the heap check, when the game needs one (once per provisional profile: it stamps the profile)
     PROG.plan(len(versions) + bool(fam['dlc']) + 4 - (prepare_xcode or (mac and not mac_pack)))   # prepare Xcode (a Mac-only build: the Mac host) replaces app build + IPA pack with one stage (a Mac app: Mac host + Mac app)
-    nx = None if dump else find_nx_extract(repo, env)
+    nx = find_nx_extract(repo, env) if not dump or (nup and any(isinstance(p, Path) for _, _, p in fam['dlc'])) else None
     dirs = {}
     for ver in versions:   # each merged version streams directly into its own image
         b, u = picks[ver]

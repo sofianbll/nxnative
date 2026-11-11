@@ -97,8 +97,10 @@ class Scan(unittest.TestCase):
         self.assertEqual(nsp.nup_file(self.tmp), nup)
         (self.tmp / '._Game.NSP').write_bytes(b'\0\x05\x16\x07')   # an AppleDouble file is not a package
         self.assertEqual(nsp.nup_file(self.tmp), nup)
-        pfs0(self.tmp / 'Game.NSP', ['x.nca'])
-        self.assertIsNone(nsp.nup_file(self.tmp))   # a package in capitals counts as a package, so no NUP is looked for
+        neighbour = self.tmp / 'Game.NSP'
+        pfs0(neighbour, ['x.nca'])
+        self.assertEqual(nsp.nup_file(self.tmp), nup)
+        self.assertEqual(nsp.nup_dlc_packages(nup), [neighbour])   # uppercase package is probed for DLC, AppleDouble is not
 
     def test_dump_with_a_package_in_capitals_beside_it(self):
         (self.tmp / 'base/exefs').mkdir(parents=True); (self.tmp / 'base/romfs').mkdir(); (self.tmp / 'base/exefs/main.npdm').write_bytes(b'x')
