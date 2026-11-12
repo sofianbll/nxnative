@@ -11,6 +11,9 @@ static int hid_mutex_lock(pthread_mutex_t *m);
 #define usleep hid_usleep
 #define pthread_mutex_lock hid_mutex_lock
 #include "../hle_hid.c"
+int dm_mods_count(void) { return 0; }
+const char *dm_mods_name(int i) { (void)i; return ""; }
+void dm_mods_set(int i, int on) { (void)i; (void)on; }
 #undef clock_gettime
 #undef usleep
 #undef pthread_mutex_lock

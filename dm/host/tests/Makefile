@@ -86,6 +86,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_haptics_apple
 	$(B)/t_front_role
 	TMPDIR="$(abspath $(B))" $(B)/t_cheats $(QUIET)
+	TMPDIR="$(abspath $(B))" $(B)/t_mods $(QUIET)
 	$(B)/t_nro
 	$(B)/t_symbols
 	$(B)/t_server_environment
@@ -135,6 +136,10 @@ nro: $(B)/t_nro
 $(B)/t_cheats: t_cheats.c ../hle_cheats.c ../dm.h ../dm_input.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_cheats.c
 .PHONY: cheats
+run: $(B)/t_mods
+$(B)/t_mods: t_mods.c ../hle_mods.c ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_mods.c
+
 cheats: $(B)/t_cheats
 	TMPDIR="$(abspath $(B))" $(B)/t_cheats
 # Regenerated on every make (FORCE), by the host Makefile: a header from an older game.py lacks newer defines; game.py writes it only when it changes, so an unchanged header rebuilds no test
