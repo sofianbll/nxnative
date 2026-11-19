@@ -34,6 +34,14 @@ pack_app = importlib.util.module_from_spec(spec); spec.loader.exec_module(pack_a
 TID = '01008CF01BAAC000'
 TEST_ROOT = Path(os.environ.get('NXNATIVE_TEST_ROOT', tempfile.gettempdir()))
 
+def nextendo_profile(path, routes=b'synthetic routes\n'):
+    path.mkdir(exist_ok=True)
+    files = {'routes.tsv': routes, 'provider-ca.der': b'fake provider CA', f'{"a" * 64}.der': b'fake pin'}
+    for name, data in files.items(): (path / name).write_bytes(data)
+    manifest = {'formatVersion': 1, 'files': {name: hashlib.sha256(data).hexdigest() for name, data in files.items()}}
+    (path / 'manifest.json').write_text(json.dumps(manifest))
+    return {*files, 'manifest.json'}
+
 def module_with_import(name, defined=False):
     """Minimal rewritten module with one dynamic symbol for packer capability checks."""
     image = bytearray(256)
@@ -49,12 +57,19 @@ def module_with_import(name, defined=False):
 HOST_C = r'''#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 extern char **environ;
 static void term(int s) { (void)s; _exit(3); }
 int main(int argc, char **argv) {
     char p[1024]; snprintf(p, sizeof p, "%s/host_run.txt", getenv("HOME")); FILE *f = fopen(p, "w");
     for (char **e = environ; *e; e++) fprintf(f, "%s\n", *e);
+    const char *routes = getenv("DM_NEXTENDO_ROUTES"); struct stat st;
+    if (routes && !stat(routes, &st)) {
+        fprintf(f, "routes_mode=%o\n", st.st_mode & 0777);
+        FILE *r = fopen(routes, "r"); char line[128];
+        if (r) { if (fgets(line, sizeof line, r)) fprintf(f, "routes_data=%s", line); fclose(r); }
+    }
     for (int i = 0; i < argc; i++) fprintf(f, "argv%d=%s\n", i, argv[i]);
     char cwd[1024]; fprintf(f, "cwd=%s\n", getcwd(cwd, sizeof cwd)); fclose(f);
     printf("standin host output\n"); fflush(stdout);
@@ -198,6 +213,35 @@ class PackReuse(unittest.TestCase):
         info = pack_app.info_plist(self.args, '26.6', False)
         self.assertIs(type(info['DMSaveSyncChoice']), int)
         self.assertEqual(info['DMSaveSyncChoice'], 1)   # the host follows DM_SAVE_SYNC_CHOICE (docs/frontends.md, The cloud saves folder)
+
+    def test_nextendo_files_and_reuse(self):
+        profile = self.tmp / 'services'
+        public = nextendo_profile(profile)
+        (profile / 'not-in-manifest.der').write_bytes(b'not an input')
+        online = self.tmp / 'patched/nextendo'; online.mkdir()
+        for n in ('main.patched.bin', 'main.fixups.tsv', 'main.gates.tsv', 'nextendo.key'): (online / n).write_text(n)
+        code = self.tmp / 'patched/codemods'; code.mkdir(); (code / 'main.patched.bin').write_bytes(b'user mod')
+        self.args.nextendo_services = str(profile); self.args.nextendo_client_id = 'public.test'
+        self.assert_repacked(); self.assert_reused()
+        dm = Path(self.args.out) / 'Contents/Resources/dm'
+        self.assertEqual({p.name for p in (dm / 'nextendo-services').iterdir()}, public)
+        self.assertEqual({p.name for p in (dm / 'nextendo').iterdir()}, {'main.patched.bin', 'main.fixups.tsv', 'main.gates.tsv'})
+        self.assertEqual((dm / 'main.patched.bin').read_bytes(), b'code')
+        self.assertEqual((dm / 'codemods/main.patched.bin').read_bytes(), b'user mod')
+        (online / 'main.patched.bin').write_text('main.PATCHED.bin')   # same size; only the variant changes
+        self.assert_repacked()
+        self.assertEqual((dm / 'nextendo/main.patched.bin').read_text(), 'main.PATCHED.bin')
+        nextendo_profile(profile, routes=b'changed   routes\n')
+        self.assert_repacked()
+        self.assertEqual((dm / 'nextendo-services/routes.tsv').read_bytes(), b'changed   routes\n')
+        self.args.nextendo_client_id = 'other.public'
+        self.assert_repacked()
+        self.assertEqual(plistlib.loads((dm.parents[1] / 'Info.plist').read_bytes())['DMNextendoClientID'], 'other.public')
+        (profile / 'routes.tsv').write_text('not what the manifest says')
+        with self.assertRaisesRegex(SystemExit, 'does not match the manifest'): self.pack()
+        self.args.nextendo_services = self.args.nextendo_client_id = None
+        self.assert_repacked()
+        self.assertFalse((dm / 'nextendo').exists() or (dm / 'nextendo-services').exists())  # a plain rebuild ignores an earlier variant
 
     def test_retargeted_input_symlink_repacks(self):
         msl = self.tmp / 'msl'
@@ -804,6 +848,52 @@ class App(unittest.TestCase):
             a.settings = None
             self.assertEqual(pack_app.info_plist(a, '14.0', None)['DMLanguage'], 'fr')   # no list: --lang as given
 
+    def test_nextendo_launch_after_move_and_private_copy(self):
+        t = self.tmp
+        app, moved = t / 'Nextendo.app', t / 'Moved Nextendo.app'
+        profile = t / 'services'
+        public = nextendo_profile(profile)
+        patched = t / 'nextendo-patched'; shutil.copytree(t / 'patched', patched)
+        (patched / 'nextendo').mkdir()
+        (patched / 'nextendo/main.patched.bin').write_bytes(b'online')
+        (patched / 'nextendo/main.fixups.tsv').write_text('fixups')
+        args = argparse.Namespace(**{**vars(self.args), 'out': str(app), 'patched': str(patched), 'nextendo_services': str(profile), 'nextendo_client_id': 'example.public'})
+        with contextlib.redirect_stdout(io.StringIO()): pack_app.pack(args)
+        app.rename(moved)
+        contents = moved / 'Contents'
+        subprocess.run(['codesign', '--verify', '--deep', '--strict', moved], check=True, capture_output=True)
+        seal = plistlib.loads((contents / '_CodeSignature/CodeResources').read_bytes())['files2']
+        self.assertTrue(all(f'Resources/dm/nextendo-services/{name}' in seal for name in public))
+        self.assertIn('Resources/dm/nextendo/main.patched.bin', seal)
+        routes = contents / 'Resources/dm/nextendo-services/routes.tsv'
+
+        def run(**env):
+            p = self.launch(app=moved, **env); out = p.communicate(timeout=30)[0].decode()
+            self.assertEqual(p.returncode, 7, out)
+            return self.host_run()
+
+        r = run()
+        self.assertNotIn('DM_NEXTENDO_ROUTES', r); self.assertNotIn('DM_NEXTENDO_CLIENT_ID', r)
+        for mode in ('offline', 'ldn'):
+            r = run(DM_NETWORK=mode, DM_NEXTENDO_ROUTES='/unused', DM_NEXTENDO_CLIENT_ID='unused')
+            self.assertEqual(r['DM_NETWORK'], mode)
+            self.assertNotIn('DM_NEXTENDO_ROUTES', r); self.assertNotIn('DM_NEXTENDO_CLIENT_ID', r)
+        r = run(DM_NETWORK='nextendo')
+        self.assertEqual((r['DM_NETWORK'], r['DM_NEXTENDO_ROUTES'], r['DM_NEXTENDO_CLIENT_ID']), ('nextendo', str(routes), 'example.public'))
+        r = run(DM_NETWORK='nextendo', DM_NEXTENDO_ROUTES=str(profile / 'routes.tsv'), DM_NEXTENDO_CLIENT_ID='override.public')
+        self.assertEqual((r['DM_NEXTENDO_ROUTES'], r['DM_NEXTENDO_CLIENT_ID']), (str(profile / 'routes.tsv'), 'override.public'))
+        routes.chmod(0o664)   # rejected by the host in place, but the contents remain as packed
+        r = run(DM_NETWORK='nextendo')
+        private = Path(r['DM_NEXTENDO_ROUTES'])
+        self.assertEqual(private.parent.parent, t / f'home/Library/Application Support/nxnative/{TID}')
+        self.assertEqual((r['routes_mode'], r['routes_data']), ('600', 'synthetic routes'))
+        self.assertFalse(private.parent.exists())  # the private copy lives only for the run
+        routes.write_bytes(b'modified after sealing\n')
+        p = self.launch(app=moved, DM_NETWORK='nextendo'); p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn('Cannot use the Nextendo service profile', (t / 'home/alert.txt').read_text())
+        self.assertFalse(list(private.parent.parent.glob('.nextendo-services.*')))
+
     def test_saved_choices(self):
         """launcher.<VAR> in the app's preferences domain, as a front end or a settings window saves it: used from Finder or the Dock, checked against this build's settings,
         after the launch environment, the player's env.txt and the bundle's, and ignored with DM_SAVED_CHOICES=0"""
@@ -1059,6 +1149,14 @@ class Script(unittest.TestCase):
         a = nsp.parse_args(['--platform', 'mac-app', '--mac-sign', 'Developer ID Application: X (T)', '-o', '/tmp/x.app'])
         self.assertEqual((a.platform, a.mac_sign, a.out), ('mac-app', 'Developer ID Application: X (T)', '/tmp/x.app'))
 
+    def test_nextendo_keeps_mac_app_platform_checks(self):
+        with mock.patch.object(nsp, 'apple_silicon', return_value=True), mock.patch.object(nsp, 'check_native_python'):
+            for args, message in ((['--prepare-xcode'], '--prepare-xcode makes an iPhone project'),
+                                  (['--romfs', 'separate'], '--romfs separate keeps the game files off the iPhone app'),
+                                  (['--shader-files'], 'SHADER_FILES / --shader-files shapes the IPA')):
+                with self.subTest(args=args), self.assertRaisesRegex(nsp.BuildError, message):
+                    nsp.main(nsp.parse_args(['--platform', 'mac-app', '--nextendo', *args]))
+
     def test_app_name(self):
         self.assertEqual(nsp.mac_app_name('The Legend of Zelda: Echoes of Wisdom'), 'The Legend of Zelda - Echoes of Wisdom')
         self.assertEqual(nsp.mac_app_name('AC/DC'), 'AC - DC'); self.assertEqual(nsp.mac_app_name(':'), 'nxnative')
@@ -1105,7 +1203,8 @@ class Script(unittest.TestCase):
         with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'PROG', self.prog), mock.patch.object(subprocess, 'run', sw_vers), mock.patch.object(nsp, 'chain_of', lambda repo: '0123456789ab'), \
              mock.patch.object(nsp, 'mac_gpu_arch', lambda *a: 'applegpu_g14s'), mock.patch.object(nsp, 'say', self.said.append):
             nsp.mac_app(sys.executable, REPO, out, 0x01008CF01BAAC000, tmp, tmp / 'ex', tmp / 'patched', tmp / 'dmhost', tmp / 'font', tmp / 'shader/cache' if gfx == 'nvn' else tmp / 'shader',
-                        kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), {}, tmp, gpus=kw.get('gpus', ''), prebake=kw.get('prebake', False))
+                        kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), kw.get('env', {}), tmp,
+                        gpus=kw.get('gpus', ''), prebake=kw.get('prebake', False), routes=kw.get('routes'))
         self.pso_cmd = next((c for c in ran if len(c) > 1 and c[1].endswith('pso_offline.py')), None)   # before the packer
         self.settings_cmd = next(c for c in ran if len(c) > 1 and c[1].endswith('dm/games/settings.py'))
         c = ran[-1]; return {c[i]: c[i + 1] for i in range(3, len(c) - 1) if c[i].startswith('--')}, tmp
@@ -1126,6 +1225,16 @@ class Script(unittest.TestCase):
         self.assertEqual((self.settings_env['SETTINGS_PLATFORM'], self.settings_env['GFXAPI'], self.settings_env['DM_LANG']), ('mac', 'nvn', 'en-US'))
         o, tmp = self.pack_cmd('vulkan', aoc=Path('/x/aoc'), sign='Developer ID Application: X (T)')
         self.assertEqual((o['--msl'], o['--aoc'], o['--sign']), (str(tmp / 'shader/vk'), '/x/aoc', 'Developer ID Application: X (T)'))
+
+    def test_nextendo_pack_command(self):
+        routes = Path('/build/nextendo-services/routes.tsv')
+        env = {'DM_NEXTENDO': '1', 'DM_NEXTENDO_CLIENT_ID': 'arcane.public'}
+        o, _ = self.pack_cmd('nvn', env=env, routes=routes)
+        self.assertEqual((o['--nextendo-services'], o['--nextendo-client-id']), (str(routes.parent), 'arcane.public'))
+        self.assertEqual(self.settings_env['DM_NEXTENDO'], '1')
+        o, _ = self.pack_cmd('nvn', env=env)
+        self.assertNotIn('--nextendo-services', o); self.assertNotIn('--nextendo-client-id', o)
+        self.assertEqual(self.settings_env['DM_NEXTENDO'], '0')
 
     def test_pso_archive(self):   # an NVN game with shader pairs: its pipeline archive for this Mac's GPU, made by pso_offline.py, goes into the app
         tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp)

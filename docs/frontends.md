@@ -7,6 +7,7 @@ A graphical app that packs games, keeps a library of them or starts them is a pr
 - [Starting a game](#starting-a-game)
 - [An app that hosts the engine](#an-app-that-hosts-the-engine)
 - [Microphone input on Mac](#microphone-input-on-mac)
+- [Nextendo on Mac](#nextendo-on-mac)
 - [Following main](#following-main)
 - [What a front end cannot see yet](#what-a-front-end-cannot-see-yet)
 
@@ -125,6 +126,16 @@ An iOS front end that supplies its own audio-session lifecycle also implements `
 A packed Mac app exposes `DM_MIC` in its settings list when a game imports the supported SDK input stream. Its default is off. The app requests macOS permission before it starts the host on the first enabled launch, including with `DM_LAUNCHER=0`. A denied request starts the game with input disabled. Front ends that spawn the host themselves must request consent in their own app and include `NSMicrophoneUsageDescription` in its Info.plist.
 
 The Mac launcher stores a selected input device's Core Audio UID as the string `launcher.DM_MIC_DEVICE` in the app's preferences. A `DM_MIC_DEVICE` set at launch or in an env file takes precedence. Use `default` to follow the system input. `DM_MIC_GAIN` uses the saved choices described above.
+
+## Nextendo on Mac
+
+Build with `--platform mac-app --nextendo`. Offer Nextendo only when `launcher.json` lists it under `DM_NETWORK`; the Mac default is `offline`. Pass `DM_NETWORK=nextendo` at launch, or persist `launcher.DM_NETWORK` as a string in the bundle's preference domain. `offline`, `lan` and `ldn` do not use Nextendo routes, identity or patched `main`. The launcher locates the shipped routes from the bundle's current path. If their ownership or permissions would make the host reject them, it checks the public files against the sealed bundle inventory and uses a private copy for that run. An explicit absolute `DM_NEXTENDO_ROUTES` overrides the bundled profile in Nextendo mode and must pass the host's checks.
+
+Register a public OAuth client (PKCE, no client secret). Set `DM_NEXTENDO_CLIENT_ID` for the build to stamp `DMNextendoClientID` in the app's `Info.plist`, or set it at launch to override that value. Sign-in and game launch must use the same public client ID. A front end can invoke `dm/host/nextendo_login` (`make -C dm/host nextendo_login`) with that ID for `sign-in`, `status` and `sign-out`; the helper is not bundled in the game. A front end implementing its own sign-in must use the same store as the host (`dm/host/nextendo_login_apple.inc`):
+
+- `~/Library/Application Support/nxnative/nextendo/refresh_token`, shared by titles for this user; `DM_NEXTENDO_LOGIN_DIR` can select a different directory if both sign-in and game use it.
+- The directory is private (`0700`), the refresh token is plain UTF-8 in a regular, non-symlink file owned by the user (`0600`, at most 8192 bytes). Hold the exclusive `flock` on `.lock` in that directory across a sign-in, refresh or sign-out that changes the token. Replace it atomically. The host can rotate the stored refresh token when it fetches a game token; the front end must not write back a stale copy.
+- Only the refresh token is persisted. Never pass it, an access token or a game token through environment variables, arguments, logs, preferences or the bundle.
 
 ## Following main
 

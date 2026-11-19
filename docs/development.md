@@ -127,7 +127,7 @@ python3 scripts/cheat_anchor.py check FFCC.cheats.toml --nso <ExeFS/main>    # t
 
 The modules are rewritten normally and again with every patch in `DM_EXEFS_PATCHES`, after registered cuts and before instruction rewriting. The changed modules go into the app's `Resources/dm/codemods` (`dm/mac/pack_app.py`). The Mac loader takes that copy only while every staged code mod is on, so the original remains available. `DM_MODS_OFF=<name>[/<name>…]` switches them together. The build stages only each mod's `dm_code.tsv` in `<build folder>/mods`, packed as `Resources/dm/mods` by `dm/mac/pack_app.py`. It deliberately stages no RomFS: NX2Apple's existing `DM_ROMFS_OVERLAY` remains the only RomFS path. This carry does not include PR #883's run-time RomFS scanner, mod `env.txt`, iOS embedding or per-mod independent code switches.
 
-`--platform mac --nextendo` prepares its own `main` copy when a signed patch exists for this build. If the Nextendo session loads that copy and the code mods also change `main`, the loader disables the entire code-mod set for the session; it does not combine the two variants. Without this conflict, the usual code-mod switch applies. `--nextendo` is not supported with `--platform mac-app`.
+`--nextendo` (both Mac platforms) prepares its own `main` copy when a signed patch exists for this build. If the Nextendo session loads that copy and the code mods also change `main`, the loader disables the entire code-mod set for the session; it does not combine the two variants. Without this conflict, the usual code-mod switch applies.
 
 ## Guest memory SVCs
 `dm/host/hle_svc.c` serializes heap resizing, physical map/unmap, stack
@@ -599,6 +599,8 @@ What step 1 does not cover yet (GitHub issue #402): a replay that equals the liv
 ### A Mac app
 
 `--platform mac-app` (`PLATFORM = 'mac-app'` in Spyder) builds everything `--platform mac` builds, then packs a Mac app of the game with `dm/mac/pack_app.py`. The app is `<NSP folder>/<game name>.app` (a `:` or `/` in the name becomes ` - `); `-o` names another path ending in `.app`. Open it from Finder, from any folder: it does not need the build folder or the drive it is on. Like the Mac host, it needs a Mac with Apple silicon. Its name, version and bundle ID are the IPA's: the game name and display version from the control data, and `org.nxnative.<title ID>`. Its icon is the game's icon as `AppIcon.icns` (`sips`, `iconutil`).
+
+With `--nextendo`, the app also carries the public service profile (`dm/nextendo-services/`) and the rewritten `main` and its tables (`dm/nextendo/`) if Nextendo's signed catalog names a patch for the exact build. The catalog is verified during the build; the app does not fetch it at launch. An app with several playable programs is not supported with `--nextendo`; pack a single program. Network still defaults to Offline; choose Nextendo only after signing in separately. See [Nextendo on Mac](frontends.md#nextendo-on-mac) for the public client ID and sign-in.
 
 The bundle holds what the IPA holds, with the Mac's shader libraries:
 

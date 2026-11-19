@@ -11,11 +11,14 @@
 // what the launch environment and the env files set (DM_ENV_LAUNCH_KEYS, DM_ENV_FILE_KEYS). DM_LAUNCHER=0 or --no-launcher (open <app> --args --no-launcher) starts the game without the window,
 // with the saved choices; so does "Show this window at launch" turned off.
 #include <CoreFoundation/CoreFoundation.h>
+#include <CommonCrypto/CommonDigest.h>
+#include <Security/Security.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
+#include <removefile.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
@@ -167,6 +170,109 @@ static void microphone_at_launch(void) {
     if (value) CFRelease(value);
 }
 
+// The host accepts only regular route/DER files owned by this user or root and not writable by others.
+// A bundle copied from another user or on a volume that synthesizes modes may need a private copy.
+static int nextendo_file(int source, int dest, const char *name, CFTypeRef digest) {
+    int fd = openat(source, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return -1;
+    struct stat st;
+    int result = -1;
+    if (!fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_size > 0 && st.st_size <= 65536) {
+        if (dest < 0) result = ((st.st_uid != geteuid() && st.st_uid != 0) || (st.st_mode & 022)) ? 1 : 0;
+        else {
+            char data[65536], expected[65], actual[65]; unsigned char hash[CC_SHA256_DIGEST_LENGTH];
+            FILE *in = fdopen(fd, "rb");
+            if (in) {
+                size_t count = fread(data, 1, sizeof data, in);
+                int complete = count == (size_t)st.st_size && fgetc(in) == EOF && !ferror(in);
+                fclose(in); fd = -1;
+                // Check the bytes against the app's sealed inventory before giving them a trusted owner/mode.
+                if (complete && CFGetTypeID(digest) == CFStringGetTypeID() &&
+                    CFStringGetCString(digest, expected, sizeof expected, kCFStringEncodingASCII)) {
+                    CC_SHA256(data, (CC_LONG)count, hash);
+                    for (size_t i = 0; i < sizeof hash; i++) snprintf(actual + i * 2, 3, "%02x", (unsigned)hash[i]);
+                    if (!strcmp(expected, actual)) {
+                        int out = openat(dest, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+                        FILE *file = out < 0 ? NULL : fdopen(out, "wb");
+                        if (file) {
+                            int written = fwrite(data, 1, count, file) == count;
+                            if (!fclose(file) && written) result = 0;
+                        } else if (out >= 0) close(out);
+                    }
+                }
+            }
+        }
+    }
+    if (fd >= 0) close(fd);
+    return result;
+}
+
+static int nextendo_files(CFDictionaryRef files, int source, int dest) {
+    const void *names[131], *digests[131]; CFIndex n = CFDictionaryGetCount(files);
+    if (n < 3 || (size_t)n > sizeof names / sizeof *names || !CFDictionaryContainsKey(files, CFSTR("routes.tsv")) ||
+        !CFDictionaryContainsKey(files, CFSTR("provider-ca.der")) || !CFDictionaryContainsKey(files, CFSTR("manifest.json"))) return -1;
+    CFDictionaryGetKeysAndValues(files, names, digests);
+    int copy = 0;
+    for (CFIndex i = 0; i < n; i++) {
+        char name[69];
+        if (CFGetTypeID(names[i]) != CFStringGetTypeID() || !CFStringGetCString(names[i], name, sizeof name, kCFStringEncodingASCII)) return -1;
+        if (strcmp(name, "routes.tsv") && strcmp(name, "provider-ca.der") && strcmp(name, "manifest.json") &&
+            (strspn(name, "0123456789abcdef") != 64 || strcmp(name + 64, ".der"))) return -1;
+        int r = nextendo_file(source, dest, name, digests[i]);
+        if (r < 0) return -1;
+        copy |= r;
+    }
+    return copy;
+}
+
+static int nextendo_inventory_is_sealed(CFDictionaryRef files) {
+    SecCodeRef self = NULL; SecStaticCodeRef code = NULL; CFDictionaryRef signing = NULL;
+    // Verify the Info.plist against this executable without hashing all the game data.
+    int ok = SecCodeCopySelf(kSecCSDefaultFlags, &self) == errSecSuccess &&
+             SecCodeCopyStaticCode(self, kSecCSDefaultFlags, &code) == errSecSuccess &&
+             SecStaticCodeCheckValidity(code, kSecCSDoNotValidateResources, NULL) == errSecSuccess &&
+             SecCodeCopySigningInformation(code, kSecCSSigningInformation, &signing) == errSecSuccess;
+    CFDictionaryRef info = ok ? CFDictionaryGetValue(signing, kSecCodeInfoPList) : NULL;
+    CFTypeRef inventory = info ? CFDictionaryGetValue(info, CFSTR("DMNextendoFiles")) : NULL;
+    ok = inventory && CFEqual(inventory, files);
+    if (signing) CFRelease(signing);
+    if (code) CFRelease(code);
+    if (self) CFRelease(self);
+    return ok;
+}
+
+static int nextendo_at_launch(const char *dm, const char *sup, char private_dir[PATH_MAX]) {
+    const char *network = getenv("DM_NETWORK");
+    if (!network || strcmp(network, "nextendo")) {
+        unsetenv("DM_NEXTENDO_ROUTES"); unsetenv("DM_NEXTENDO_CLIENT_ID");
+        return 1;
+    }
+    char client[129];
+    if (!getenv("DM_NEXTENDO_CLIENT_ID") && info_string("DMNextendoClientID", client, sizeof client))
+        if (setenv("DM_NEXTENDO_CLIENT_ID", client, 0)) return 0;
+    const char *override = getenv("DM_NEXTENDO_ROUTES");
+    if (override && *override) return 1;   // the host still checks an explicit route override
+    CFTypeRef files = CFBundleGetValueForInfoDictionaryKey(CFBundleGetMainBundle(), CFSTR("DMNextendoFiles"));
+    if (!files || CFGetTypeID(files) != CFDictionaryGetTypeID()) return 0;
+    char bundled[PATH_MAX], routes[PATH_MAX];
+    if ((size_t)snprintf(bundled, sizeof bundled, "%s/nextendo-services", dm) >= sizeof bundled) return 0;
+    int source = open(bundled, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (source < 0) return 0;
+    int status = nextendo_files(files, source, -1);
+    if (status > 0 && nextendo_inventory_is_sealed(files)) {
+        char staging[PATH_MAX];
+        status = -1;
+        if ((size_t)snprintf(staging, sizeof staging, "%s/.nextendo-services.XXXXXX", sup) < sizeof staging && mkdtemp(staging)) {
+            strcpy(private_dir, staging);
+            int dest = open(staging, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (dest >= 0) { status = nextendo_files(files, source, dest); close(dest); }
+        }
+    }
+    close(source);
+    return status == 0 && (size_t)snprintf(routes, sizeof routes, "%s/routes.tsv", *private_dir ? private_dir : bundled) < sizeof routes &&
+           !setenv("DM_NEXTENDO_ROUTES", routes, 1);
+}
+
 // A game of several programs (Super Mario 3D All-Stars): pack_app.py's table of them, with this app's paths filled in (it may move), for oe::ExecuteProgram (DM_PROGRAMS, hle_oe.c)
 static void programs_table(const char *contents, const char *res, const char *sup) {
     char in[PATH_MAX], out[PATH_MAX]; snprintf(in, sizeof in, "%s/dm/programs.tsv", res); snprintf(out, sizeof out, "%s/programs.tsv", sup);
@@ -240,14 +346,26 @@ int main(int argc, char **argv) {
     setenv("DM_WINDOW", "1", 0); setenv("DM_AUDIO", "1", 0);
     programs_table(contents, res, sup);
     if (chdir(sup)) { fprintf(stderr, "[RED] launcher: cannot enter %s\n", sup); return 1; }
+    char private_routes[PATH_MAX] = "";
+    if (!nextendo_at_launch(dm, sup, private_routes)) {
+        if (*private_routes) removefile(private_routes, NULL, REMOVEFILE_RECURSIVE);
+        alert(name, "Cannot use the Nextendo service profile. Rebuild with --nextendo, or select Offline or Local wireless.");
+        return 1;
+    }
     struct sigaction sa = {.sa_handler = forward};   // no SA_RESTART: waitpid below sees EINTR and waits again
     sigemptyset(&sa.sa_mask);
     sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL); sigaction(SIGHUP, &sa, NULL);
     char *host_argv[] = {host, dm, NULL};
     int err = posix_spawn(&g_child, host, NULL, NULL, host_argv, environ);
-    if (err) { fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", host, strerror(err)); return 1; }
+    if (err) {
+        if (*private_routes) removefile(private_routes, NULL, REMOVEFILE_RECURSIVE);
+        fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", host, strerror(err)); return 1;
+    }
     int status;
-    while (waitpid(g_child, &status, 0) < 0) if (errno != EINTR) return 1;
+    pid_t waited;
+    do { waited = waitpid(g_child, &status, 0); } while (waited < 0 && errno == EINTR);
+    if (*private_routes) removefile(private_routes, NULL, REMOVEFILE_RECURSIVE);
+    if (waited < 0) return 1;
     // Cloud saves (DM_SAVE_SYNC, dm/host/save_sync.h): what the host committed and had not sent yet goes now, after a crash too (the committed save is whole whatever the host was doing)
     // DM_SAVE as the host had it: an env file or the launch environment may have set another folder than this app's own
     if (!save_sync_after_exit(getenv("DM_SAVE"), id)) fprintf(stderr, "launcher: the save did not reach the cloud; it goes at the next start\n");

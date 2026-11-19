@@ -97,9 +97,9 @@ Shows the frames per second at the top left.
 
 How the game reaches other players. **Offline** is the default and keeps the game off the network. **LAN** and **Local wireless** play with devices on the same Wi-Fi network: LAN for games with a LAN mode, Local wireless for the Switch's local play between consoles.
 
-**Nextendo (online)** is offered only by an app built with `--nextendo`, and is then the default. It plays online through Nextendo, a community service that stands in for Nintendo's servers. Sign in under **Online** below the settings first. Nextendo gives a game token only to an account with a confirmed e-mail and a linked Discord account. The app keeps the sign-in in its own storage, and signing out there forgets it.
+**Nextendo (online)** is offered only by an app built with `--nextendo`. It plays online through Nextendo, a community service that stands in for Nintendo's servers. On iPhone it is the default; sign in under **Online** below the settings first. On Mac, sign in through your front end or the [Mac sign-in tool](frontends.md#nextendo-on-mac), then select Nextendo; the default stays Offline. Nextendo gives a game token only to an account with a confirmed e-mail and a linked Discord account.
 
-Signing in is all a game needs to go online: the app already carries Nextendo's certificate, so there is nothing to copy onto the phone. The game takes your name, country and, when the account has one, your birthday from your Nextendo account. Under **Online**, **Birthday, if Nextendo has none** is used only when the account gives none.
+The packed app already carries Nextendo's public certificates. The game takes your name, country and, when the account has one, your birthday from your Nextendo account. On iPhone, **Birthday, if Nextendo has none** under **Online** is used only when the account gives none.
 
 **Player name** appears below the settings while Network is anything but Offline. It is the name other players see, up to 10 characters. Leave it empty to use your Nextendo username, or Player when you are not signed in. `DM_NICK` in `Documents/env.txt` does the same, and the field then shows it without letting you change it.
 

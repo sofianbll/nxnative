@@ -4,7 +4,7 @@
 # and in Contents/Resources what the IPA carries (dm/ios/tools/build_ipa.sh): romfs.img (the RomFS image), control.nacp (the game's control data, which the host finds beside the RomFS: hle_fs.c control_read), msl/<b-chain.img | vk | gl> (the Mac shader libraries, named as in the IPA),
 # aoc/<index>/ (DLC), pso/ (an NVN game's pipeline archive made offline for this Mac's GPU, dm/gfx/tools/pso_offline.py: the launcher hands it to the host as DM_PSO_BUNDLE),
 # and dm/ (the rewritten modules and their rewriter tables, nro.tsv, the profile's shader_map.tsv / pso_manifest.tsv / c1_full.tsv / cb_extent.tsv / shader_pairs.tsv / pso_pairs.tsv, font/, env.txt,
-# launcher.json: the game's launcher settings, dm/games/settings.py, which the settings window and Mac front ends show),
+# launcher.json (the game's launcher settings), and, with --nextendo, nextendo-services/ and the optional nextendo/main),
 # plus AppIcon.icns from the game's icon (sips, iconutil) and the Info.plist keys the launcher reads (DMTitleID, DMRomfsMarker, DMLanguage).
 # romfs.img, msl, aoc and pso are links into the signed data bundles in Contents/PlugIns that hold them (see Data bundles below), so that a pack which changes only the host signs in a second.
 # The large folders are APFS clones (cp -c) when the app is on the same APFS volume as the build, so they take no space; plain copies otherwise.
@@ -101,7 +101,7 @@ def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and th
         for obj, src in zip(objs, (HERE / 'launcher.c', HERE.parent / 'host/save_sync.c')):
             run([clang, '-isysroot', sdk, '-arch', 'arm64', f'-mmacosx-version-min={minos}', '-O2', '-Wall', '-I', HERE.parent / 'host', '-c', '-o', obj, src])
         run([swiftc, '-sdk', sdk, '-target', f'arm64-apple-macos{minos}', '-O', '-swift-version', '5', '-parse-as-library', '-module-cache-path', Path(t) / 'module-cache',
-             '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'AppKit', '-framework', 'SwiftUI', '-framework', 'AVFAudio', '-framework', 'CoreAudio'])
+             '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'AppKit', '-framework', 'SwiftUI', '-framework', 'AVFAudio', '-framework', 'CoreAudio', '-framework', 'Security'])
 
 
 def make_icns(jpg, out):   # the game's icon (256x256 JPEG) at every size an .icns holds
@@ -311,6 +311,38 @@ def copy_msl(msl, msls, dst, clone):
     dst.mkdir(parents=True); copy(msls, dst, clone)
 
 
+def nextendo_inputs(a):
+    """Only the public files named by nextendo_services.py and, if built, the rewritten main."""
+    if not a.nextendo_services:
+        if a.nextendo_client_id: raise SystemExit('--nextendo-client-id requires --nextendo-services')
+        return [], []
+    if a.program: raise SystemExit('--nextendo-services requires a single program')
+    if a.nextendo_client_id and not re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', a.nextendo_client_id):
+        raise SystemExit('invalid public Nextendo client ID')
+    profile = Path(a.nextendo_services)
+    manifest = profile / 'manifest.json'
+    try:
+        if manifest.is_symlink() or not manifest.is_file() or not 0 < manifest.stat().st_size <= 65536:
+            raise ValueError('invalid manifest')
+        info = json.loads(manifest.read_text(encoding='utf-8'))
+        public = info['files']
+        if (info.get('formatVersion') != 1 or not isinstance(public, dict) or len(public) > 130 or
+            not {'routes.tsv', 'provider-ca.der'} <= public.keys() or any(
+                name not in ('routes.tsv', 'provider-ca.der') and not re.fullmatch(r'[0-9a-f]{64}\.der', name) for name in public)):
+            raise ValueError('invalid public file inventory')
+        services = [profile / name for name in sorted(public)]
+        if any(p.is_symlink() or not p.is_file() or not 0 < p.stat().st_size <= 65536 or digest(p) != public[p.name] for p in services):
+            raise ValueError('a public profile file is missing or does not match the manifest')
+    except (OSError, TypeError, KeyError, ValueError) as e:
+        raise SystemExit(f'invalid Nextendo service profile at {profile}: {e}') from e
+    variant_dir = Path(a.patched) / 'nextendo'
+    variant = sorted(p for pat in MODULE_FILES if pat.startswith('*') for p in variant_dir.glob(pat.replace('*', 'main')))
+    if variant_dir.is_symlink() or (variant_dir.exists() and (
+        not {'main.patched.bin', 'main.fixups.tsv'} <= {p.name for p in variant} or any(p.is_symlink() or not p.is_file() for p in variant))):
+        raise SystemExit(f'incomplete Nextendo main and rewriter tables at {variant_dir}')
+    return variant, [manifest, *services]
+
+
 def selected_inputs(a):
     """Resolve once: these same lists supply both the reuse key and the copies."""
     for name in ('patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso'):
@@ -330,11 +362,12 @@ def selected_inputs(a):
     tables = [Path(a.tables) / n for n in TABLES if (Path(a.tables) / n).is_file()]
     pairs = Path(a.pso_pairs) if a.pso_pairs and not any(p.name == 'pso_pairs.tsv' for p in tables) else None
     fonts = sorted(p for p in Path(a.font).glob('*.ttf') if not detritus(p.name))
-    files = [Path(a.host)] + mods + msls + pso + tables + fonts + ([pairs] if pairs else [])
+    variant, services = nextendo_inputs(a)
+    files = [Path(a.host)] + mods + msls + pso + tables + fonts + variant + services + ([pairs] if pairs else [])
     files += [Path(p) for p in (a.env_file, a.settings, a.icon, a.control_nacp) if p]
     for p in files:
         if not p.is_file(): raise SystemExit(f'no input file at {p}')
-    return mods, msls, pso, tables, pairs, fonts, files
+    return mods, msls, pso, tables, pairs, fonts, variant, services, files
 
 
 def replace_app(tmp, out):
@@ -399,15 +432,15 @@ def pack(a):
     try:
         a = argparse.Namespace(**vars(a))
         a.game_mods = getattr(a, 'game_mods', None)
-        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'html', 'control_nacp', 'game_mods'):
+        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'html', 'control_nacp', 'game_mods', 'nextendo_services'):
             if getattr(a, name): setattr(a, name, str(Path(getattr(a, name)).resolve()))
-        mods, msls, pso, tables, pairs, fonts, files = selected_inputs(a)
+        mods, msls, pso, tables, pairs, fonts, variant, services, files = selected_inputs(a)
         # --program: the other programs of a game of several programs (index, rewritten modules, RomFS, shader libraries, tables, offline pages; tab-separated), which go in beside the first's as one app
         programs = []
         for row in a.program or []:
             n, patched, prom, pmsl, ptab, phtml = row.split('\t')
             pa = argparse.Namespace(**{**vars(a), 'patched': patched, 'romfs': prom, 'msl': pmsl, 'tables': ptab, 'pso': None, 'pso_pairs': None, 'aoc': None, 'marker': None})
-            pmods, pmsls, _, ptables, _, _, pfiles = selected_inputs(pa)
+            pmods, pmsls, _, ptables, _, _, _, _, pfiles = selected_inputs(pa)
             programs.append((n, Path(prom), Path(pmsl), Path(phtml), pmods, pmsls, ptables)); files += pfiles
         clang = Path(run(['xcrun', '--find', 'clang']).strip()).resolve()
         swiftc = Path(run(['xcrun', '--find', 'swiftc']).strip())   # not resolved: the driver is a link to swift-frontend, which acts by its name
@@ -451,7 +484,7 @@ def pack(a):
     sib = romfs.parent / PROGRAM_ROMFS   # the RomFS of the application's other programs, beside this one's where the host mounts them by program index (hle_fs.c; scripts/pack_nup.py)
     code = Path(a.patched) / 'codemods'
     trees = {'romfs': romfs, 'aoc': aoc, 'programs': sib if sib.is_dir() else None, 'code': code if code.is_dir() else None, 'mod_meta': Path(a.game_mods) if a.game_mods else None}
-    lists = {'mods': mods, 'msl': msls, 'pso': pso}
+    lists = {'mods': mods, 'msl': msls, 'pso': pso, 'nextendo': variant}
     clone = {k: bool(d) and can_clone(d, res) for k, d in trees.items()} | {k: bool(ps) and can_clone(ps[0], res) for k, ps in lists.items()}
     if is_chain_library(msl): clone['msl'] = False   # copy_msl writes it, which the free-space check below counts
     need = sum(tree_bytes(d) for k, d in trees.items() if d and not clone[k]) + sum(p.stat().st_size for k, ps in lists.items() if not clone[k] for p in ps)
@@ -463,6 +496,13 @@ def pack(a):
     shutil.copy(a.host, mac / 'dmhost')   # data and mode, not the build's extended attributes (copy2 would carry them into the app)
     copy(mods, dm, clone['mods'])
     if trees['code']: copy([code], dm / 'codemods', clone['code'])   # modules rewritten with code patches
+    if variant:
+        (dm / 'nextendo').mkdir(); copy(variant, dm / 'nextendo', clone['nextendo'])
+    if services:
+        (dm / 'nextendo-services').mkdir()
+        for f in services:
+            target = dm / 'nextendo-services' / f.name
+            shutil.copyfile(f, target); target.chmod(0o644)   # public data, including after an administrator installs the bundle
     if trees['mod_meta']: copy([trees['mod_meta']], dm / 'mods', clone['mod_meta'])   # dm_code.tsv switch metadata, never RomFS
     if tables: copy(tables, dm, False)
     if pairs: shutil.copyfile(pairs, dm / 'pso_pairs.tsv')   # the split's copy, for a profile without the table
@@ -519,6 +559,9 @@ def pack(a):
     if icon: step('icon'); make_icns(a.icon, res / 'AppIcon.icns')
     info = info_plist(a, minos, icon)
     info['DMModuleFiles'] = [p.name for p in mods]
+    if services:
+        info['DMNextendoFiles'] = {p.name: took[str(p)][1] for p in services}
+        if a.nextendo_client_id: info['DMNextendoClientID'] = a.nextendo_client_id
     if nso_syms.audio_input_capable(mods + [module for program in programs for module in program[4]]):
         info['NSMicrophoneUsageDescription'] = f'{a.name} uses the microphone for in-game audio input.'
     commit = source_commit()
@@ -560,6 +603,8 @@ def parse(argv):
     ap.add_argument('--font', required=True, help='the folder of the shared-font stand-ins (nintendo_ext.ttf)')
     ap.add_argument('--aoc', help='the DLC RomFS images or folders by index')
     ap.add_argument('--game-mods', help='code-mod switch metadata staged by dm/tools/mods.py (Resources/dm/mods; no RomFS)')
+    ap.add_argument('--nextendo-services', help='the public profile from nextendo_services.py; also packs an optional nextendo/main from --patched')
+    ap.add_argument('--nextendo-client-id', help='public OAuth client ID; never an account token or client secret')
     ap.add_argument('--pso', help='the pipeline archive made offline for this Mac (pso_offline.py --platform macos output: <arch>.mtl4a, prebuilt.tsv)')
     ap.add_argument('--pso-pairs', help='pso_pairs.tsv for a profile that has none (the shader split\'s copy)')
     ap.add_argument('--html', help='the offline HTML pages (nx_extract --html), which go beside the RomFS')

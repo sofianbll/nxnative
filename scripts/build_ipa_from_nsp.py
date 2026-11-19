@@ -2848,7 +2848,7 @@ def mac_host(py, repo, work, env, logs, g):
 
 
 def nextendo_build(py, repo, exe_dir, patched, work, env, logs, g):
-    """--nextendo (an iPhone or Mac-only build): the game's online parts, after NX-Port-Studio's build (MIT). Nextendo's signed patch catalog (dm/tools/nextendo_patches.py, checked offline with
+    """--nextendo: the game's online parts, after NX-Port-Studio's build (MIT). Nextendo's signed patch catalog (dm/tools/nextendo_patches.py, checked offline with
     dm/tools/nextendo_verify.swift) patches a copy of main when it lists this exact build, and the copy is rewritten into patched/nextendo, which the host maps in place of main when Nextendo
     is on (loader.c nextendo_main; the iPhone's app embeds it as module nmain, dm/ios/tools/gen_embed.py); offline and LAN do not use it. Then the public service profile
     (dm/tools/nextendo_services.py) goes into <id>_build/nextendo-services. Returns the profile's routes.tsv (DM_NEXTENDO_ROUTES). No account data is read or written here: the player
@@ -3103,7 +3103,7 @@ def mac_app_name(name):   # the app's file name: the game name with the characte
     return re.sub(r'\s*[:/]\s*', ' - ', name).strip(' .-') or 'nxnative'
 
 
-def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', programs=None, control=None, prebake=False, mods_dir=None):
+def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, lang, g, name, version, bundle_id, icon, sign, env, logs, env_file='', gpus='', programs=None, control=None, prebake=False, mods_dir=None, routes=None):
     """The last stage of PLATFORM 'mac-app': pack the Mac app (dm/mac/pack_app.py) from what a Mac-only build made: the Mac host and font (mac_host), the packed version's RomFS and rewritten
     modules, the Mac shader libraries (msl: <shader>/cache, whose b-<chain> goes in, or a Vulkan or GL game's <shader>, whose vk / gl goes in), the DLC, the profile's tables (with the shader pairs
     the pipeline prebuild reads), the pipeline archive made offline for this Mac (mac_pso; gpus: --gpu / PSO_GPUS), the launcher settings and an environment file.
@@ -3117,7 +3117,7 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
     # The launcher settings the IPA carries (dm/games/settings.py), without the iPhone's own switches: the app's settings window and Mac front ends show them (docs/frontends.md)
     settings = work / 'app/launcher.json'; settings.parent.mkdir(parents=True, exist_ok=True)
     run([py, repo / 'dm/games/settings.py', g.id, patched, control or game / 'control.nacp', settings,
-         *(r['patched'] for r in (programs or {}).values())], logs / 'mac_settings.log', env=dict(env, GFXAPI=gfx, SETTINGS_PLATFORM='mac', DM_LANG=lang))
+         *(r['patched'] for r in (programs or {}).values())], logs / 'mac_settings.log', env=dict(env, GFXAPI=gfx, SETTINGS_PLATFORM='mac', DM_LANG=lang, DM_NEXTENDO='1' if routes else '0'))
     cmd = [py, repo / 'dm/mac/pack_app.py', out, '--host', host, '--patched', patched, '--romfs', rfs.source(game), '--msl', lib, '--tables', g.table('shader_map.tsv').parent,
            '--font', font, '--title-id', f'{app:016X}', '--name', name, '--bundle-id', bundle_id, '--lang', lang, '--sign', sign or '-']
     split_pairs = work / 'shader/pso_pairs.tsv'   # the split's copy of pso_pairs.tsv, for a profile without the table (as mac_run's DM_PSO_PAIRS)
@@ -3126,6 +3126,9 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
                    ('--env-file', Path(os.path.expanduser(env_file)).resolve() if env_file else None), ('--settings', settings),
                    ('--control-nacp', next((p for p in (control, game / 'control.nacp') if p and Path(p).is_file()), None)), ('--game-mods', mods_dir)):
         if v: cmd += [opt, v]
+    if routes:
+        cmd += ['--nextendo-services', routes.parent]
+        if client := env.get('DM_NEXTENDO_CLIENT_ID'): cmd += ['--nextendo-client-id', client]
     for n, r in (programs or {}).items(): cmd += ['--program', f'{n}\t{r["patched"]}\t{r["romfs"]}\t{r["msl"]}\t{r["tables"]}\t{r["html"]}']
     if (game / 'html').is_dir(): cmd += ['--html', game / 'html']
     unchanged = False
@@ -3261,9 +3264,9 @@ def parse_args(argv):
     ap.add_argument('--no-heap-check', action='store_true', help='a provisional profile: skip the heap check and the address region check on the Mac (the alias / heap split stays a guess); a derived profile: skip the address region check')
     ap.add_argument('--progress', choices=('auto', 'bar', 'lines', 'json', 'off'), help='stage lines on the console: bar = one line per stage, redrawn in place; lines = a plain line every BEAT seconds; json = newline-delimited JSON events (no prompts); off = only each stage\'s start and end '
                     '(default: the PROGRESS setting; auto = bar in a terminal or Spyder, lines when the output goes to a file or a pipe)')
-    ap.add_argument('--nextendo', action='store_true', help='--platform ios or mac: also build for online play on Nextendo: the game patch Nextendo signs for this exact build (fetched from nextendo.network), '
-                    'and the public service profile. The iPhone app then offers Network: Nextendo (the default) and a sign-in on its settings screen; the Mac run command has DM_NETWORK=nextendo, '
-                    'after dm/host/nextendo_login sign-in (make -C dm/host nextendo_login)')
+    ap.add_argument('--nextendo', action='store_true', help='also build for online play on Nextendo: the game patch Nextendo signs for this exact build (fetched from nextendo.network), '
+                    'and the public service profile. On iPhone, sign in under Online; on Mac, sign in in your front end or with dm/host/nextendo_login. '
+                    'A Mac app starts offline unless you choose Nextendo in its Network settings; the Mac run command selects Nextendo.')
     return ap.parse_args(argv)
 
 
@@ -3369,7 +3372,6 @@ def main(args=None):
     prepare_xcode = args.prepare_xcode or PREPARE_XCODE
     platform = args.platform or PLATFORM
     if platform not in ('ios', 'mac', 'mac-app'): raise BuildError(f'PLATFORM / --platform must be ios, mac or mac-app: {platform}')
-    if getattr(args, 'nextendo', False) and platform == 'mac-app': raise BuildError('--nextendo is for --platform ios or mac: a Mac app does not carry Nextendo\'s patched main yet')
     mac = platform in ('mac', 'mac-app')   # the Mac's shaders and host only: no iOS shaders, Xcode project or IPA (mac_run prints the command; mac-app packs a Mac app, mac_app)
     mac_pack = platform == 'mac-app'
     mod_roots = mod_folders(args)
@@ -3572,6 +3574,8 @@ def main(args=None):
     patched = work / f'patched_{pkg_ver}'
     if mod_roots and g.get('programs', '') and not PROGRAM_INDEX:
         raise BuildError('--mods requires a single program; select one with --program')
+    if mac_pack and getattr(args, 'nextendo', False) and g.get('programs', '') and not PROGRAM_INDEX:
+        raise BuildError('--nextendo with --platform mac-app requires a single program; select one with --program')
     game_mods = prepare_mods(repo, mod_roots, app, env)
     env.pop('DM_EXEFS_PATCHES', None)   # only the secondary rewrite may patch the original modules
     g = rewrite(py, repo, game / 'ExeFS', patched, env, logs, g, provisional)
@@ -3632,7 +3636,7 @@ def main(args=None):
         programs = other_programs(args, g)
         if not icon: say(('no game icon: the NUP carries none' if nup else 'no game icon: a dump folder has no control data') + '; the app\'s icon will be blank; --icon / ICON or --fallback-icon / FALLBACK_ICON gives it one' if dump else '[RED] no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the app\'s icon will be blank')
         mac_app(py, repo, out_ipa, app, work, game, patched, host, font, ios, aoc, gfx, lang, g, app_name, app_version, bundle_id, icon, args.mac_sign or MAC_SIGN, env, logs, env_file,
-                (args.gpu or PSO_GPUS).strip(), programs, control, PREBAKE if args.prebake is None else args.prebake, mods_dir=mods_dir)
+                (args.gpu or PSO_GPUS).strip(), programs, control, PREBAKE if args.prebake is None else args.prebake, mods_dir=mods_dir, routes=routes)
         rmtree(work / 'tmp')
         say(f'done: {out_ipa} ({tree_size(out_ipa)[1] / 2**30:.1f} GB); '
             f'open it from Finder. Its save is in ~/Library/Application Support/nxnative/{app:016X}/, its log in ~/Library/Logs/nxnative/{app:016X}.log')
