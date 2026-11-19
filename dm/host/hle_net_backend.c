@@ -13,6 +13,7 @@
 #include <dns_sd.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <net/if.h>
 #if TARGET_OS_OSX
@@ -186,12 +187,13 @@ static net_udp_watch *net_udp_entry(const net_ref *r) {   // with g_udp_watch_lo
     if (w->generation != r->generation) { memset(w, 0, sizeof *w); w->generation = r->generation; }
     return w;
 }
-static void net_udp_note(const net_ref *r, int received, int sent) {
+static void net_udp_note(const net_ref *r, int received, int sent, const struct sockaddr_in *endpoint) {
     if (r->type != 2 || r->guest < 0 || r->guest >= NET_MAX) return;
     uint64_t now = net_ms(); char line[160]; line[0] = 0;
     pthread_mutex_lock(&g_udp_watch_lock);
     net_udp_watch *w = net_udp_entry(r);
     w->in += (uint64_t)received; w->out += (uint64_t)sent;
+    uint64_t count = sent ? w->out : w->in;
     if (received) {
         if (w->quiet) snprintf(line, sizeof line, "net: UDP socket %d: datagrams again after %.1f s without (in %llu, out %llu)", r->guest,
                                (now - w->quiet_since_ms) / 1000.0, (unsigned long long)w->in, (unsigned long long)w->out);
@@ -203,6 +205,16 @@ static void net_udp_note(const net_ref *r, int received, int sent) {
     }
     pthread_mutex_unlock(&g_udp_watch_lock);
     if (line[0]) fprintf(stderr, "%s\n", line);
+    if ((sent || received) && dm_net_trace_enabled() && (count <= 16 || count % 64 == 0)) {
+        int saved = errno;
+        struct sockaddr_in connected; socklen_t size = sizeof connected;
+        if (!endpoint && !getpeername(r->fd, (struct sockaddr *)&connected, &size)) endpoint = &connected;
+        char ip[INET_ADDRSTRLEN];
+        if (endpoint && endpoint->sin_family == AF_INET && inet_ntop(AF_INET, &endpoint->sin_addr, ip, sizeof ip))
+            fprintf(stderr, "net: udp %s guest_fd=%d %s=%s:%u packets=%" PRIu64 "\n",
+                    sent ? "sendto" : "recvfrom", r->guest, sent ? "dst" : "src", ip, (unsigned)ntohs(endpoint->sin_port), count);
+        errno = saved;
+    }
 }
 static void net_udp_error(const net_ref *r, int sending, int err) {
     if (r->type != 2 || err <= 0 || err >= 64) return;
@@ -500,9 +512,10 @@ long dm_net_recv(int guest, void *buf, unsigned long len, int flags, void *addr,
         // Kernel copyout cannot fault into the dirty-page signal hook. A wait or
         // partial stream read may allow the renderer to protect this span again.
         dm_guest_write_prepare(buf ? (char *)buf + total : NULL, len - total);
-        socklen_t n = sizeof a; ssize_t got = recvfrom(r.fd, buf ? (char *)buf + total : NULL, len - total, hostflags, addr ? (struct sockaddr *)&a : NULL, addr ? &n : NULL); int err = errno;
+        int with_address = addr || (r.type == 2 && dm_net_trace_enabled());
+        socklen_t n = sizeof a; ssize_t got = recvfrom(r.fd, buf ? (char *)buf + total : NULL, len - total, hostflags, with_address ? (struct sockaddr *)&a : NULL, with_address ? &n : NULL); int err = errno;
         if (got >= 0) {
-            total += (size_t)got; result = (long)total; net_udp_note(&r, 1, 0);
+            total += (size_t)got; result = (long)total; net_udp_note(&r, 1, 0, with_address && n >= sizeof a ? &a : NULL);
             if (addr) net_addr_out(addr, addrlen, &a);
             if (!got || r.type != 1 || !(flags & 0x40) || r.nonblock || (flags & 0x80) || total == len) break;
             continue;
@@ -510,11 +523,11 @@ long dm_net_recv(int guest, void *buf, unsigned long len, int flags, void *addr,
         // A host report of ICMP unreachable for an earlier send, delivered on the next receive of a UDP socket. In Nextendo mode it counts as
         // no datagram yet, so a peer that is not listening yet does not end a session (Mush8 does the same for Mario Kart 8 Deluxe)
         if (r.type == 2 && (err == ECONNREFUSED || err == ECONNRESET || err == ENETRESET) && dm_net_nextendo_enabled()) err = EAGAIN;
-        if (err == EAGAIN) net_udp_note(&r, 0, 0); else net_udp_error(&r, 0, err);
+        if (err == EAGAIN) net_udp_note(&r, 0, 0, NULL); else net_udp_error(&r, 0, err);
         if (err != EAGAIN || r.nonblock || (flags & 0x80)) { if (!total) result = net_error(net_errno(err)); break; }
         if (net_wait(&r, POLLIN, r.recv_ms, start)) { if (!total) result = -1; break; }
     }
-    close(r.fd); net_trace("recv", guest, result); return result;
+    close(r.fd); if (r.type != 2 || !dm_net_trace_enabled()) net_trace("recv", guest, result); return result;
 }
 long dm_net_send(int guest, const void *buf, unsigned long len, int flags, const void *addr, unsigned addrlen) {
     if (!net_gate()) return -1;
@@ -536,7 +549,7 @@ long dm_net_send(int guest, const void *buf, unsigned long len, int flags, const
     uint64_t start = net_ms(); long result; int reported = 0;
     for (;;) {
         result = addr ? net_discovery_packet(r.fd,buf,len,hostflags,&a) : sendto(r.fd,buf,len,hostflags,NULL,0); int err = errno;
-        if (result >= 0) { net_udp_note(&r, 0, 1); break; }
+        if (result >= 0) { net_udp_note(&r, 0, 1, addr ? &a : NULL); break; }
         if (err != EAGAIN) net_udp_error(&r, 1, err);
         // As on a receive (dm_net_recv): the host hands an earlier datagram's ICMP report to the next call on a UDP socket, a send too, and then
         // does not send this datagram (the report is cleared). In Nextendo mode it is sent again once
@@ -554,7 +567,7 @@ long dm_net_send(int guest, const void *buf, unsigned long len, int flags, const
         // unavailable bounded subnet must not turn its success into failure.
         t_net_errno=saved;
     }
-    close(r.fd); net_trace("send", guest, result); return result;
+    close(r.fd); if (r.type != 2 || !dm_net_trace_enabled()) net_trace("send", guest, result); return result;
 }
 
 static int net_option(int level, int option, int *hostlevel, int *hostoption, unsigned *size) {
@@ -800,7 +813,10 @@ static int net_getaddrinfo_logged(const char *host, const char *service, const v
     int code = net_getaddrinfo(host, service, hints, result, legacy);
     if (dm_net_enabled()) {
         const dm_net_addrinfo *h = hints; char name[96]; snprintf(name, sizeof name, "%s", host ? host : "(none)");
-        fprintf(stderr, "%snet: name lookup %s port %s (family %d, flags %#x, %s layout) -> %d\n", code ? "[RED] " : "", name, service ? service : "-",
+        if (host && strspn(name, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-%:") != strlen(name)) strcpy(name, "<invalid>");
+        const char *port = service ? service : "-";
+        if (service && (strnlen(service, 32) == 32 || strspn(service, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-") != strlen(service))) port = "<invalid>";
+        fprintf(stderr, "%snet: name lookup %s port %s (family %d, flags %#x, %s layout) -> %d\n", code ? "[RED] " : "", name, port,
                 h ? h->family : 0, h ? (unsigned)h->flags : 0u, legacy ? "addrinfo" : "AddrInfo", code);
     }
     return code;

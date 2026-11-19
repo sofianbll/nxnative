@@ -24,6 +24,10 @@ static inline int dm_net_ldn_enabled(void) {
     return mode == DM_NET_LDN || mode == DM_NET_AUTO;
 }
 int dm_net_enabled(void);
+static inline int dm_net_trace_enabled(void) {
+    const char *flag = getenv("DM_NET_TRACE");
+    return flag && flag[0] == '1' && !flag[1];
+}
 // Startup-only DNS policy: -1 refuses, 0 keeps the name, 1 supplies IPv4.
 // Only explicit Nextendo/auto modes consult the provider.
 typedef int (*dm_net_dns_provider)(const char *host, char *output, size_t capacity);

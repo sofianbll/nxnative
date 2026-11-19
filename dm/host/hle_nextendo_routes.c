@@ -154,7 +154,16 @@ static const route *find_route(const char *host) {
 }
 static int resolve_host(const char *host, char *output, size_t capacity) {
     if (!dm_net_nextendo_enabled() || !host) return 0; struct in_addr ip; if (inet_pton(AF_INET, host, &ip) == 1) return 0;
-    const route *entry = find_route(host); if (!entry || capacity <= strlen(entry->address)) return -1; strcpy(output, entry->address); return 1;
+    const route *entry = find_route(host);
+    if (dm_net_trace_enabled()) {
+        int saved = errno;
+        char normalized[254];
+        const char *kind = !entry ? "none" : entry->match == 1 ? "suffix" : entry->match == 2 ? "label" : entry->pinned ? "pinned-exact" : "exact";
+        fprintf(stderr, "net: dns normalized=%s rule=%s:%s ipv4=%s\n",
+                hostname(host, normalized) ? normalized : "<invalid>", kind, entry ? entry->host : "-", entry ? entry->address : "-");
+        errno = saved;
+    }
+    if (!entry || capacity <= strlen(entry->address)) return -1; strcpy(output, entry->address); return 1;
 }
 static bool admit_peer(const char *host) { if (!dm_net_nextendo_enabled()) return true; const route *entry = find_route(host); return entry && entry->peer[0]; }
 static bool copy_peer_policy(const char *host, char *output, size_t capacity, const uint8_t **ca, size_t *size, bool pinned) {

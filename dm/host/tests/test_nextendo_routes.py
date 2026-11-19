@@ -147,15 +147,36 @@ def main():
                 if path in (str(config), str(v2)):
                     args.append(str(listener.getsockname()[1]))
                     if path == str(v2): args.append('v2')
-                result = subprocess.run(args, text=True, capture_output=True, timeout=15)
+                traced = path == str(v2)
+                result = subprocess.run(args, text=True, capture_output=True, timeout=15,
+                                        env=dict(os.environ, DM_NET_TRACE='1' if traced else '0'))
                 if result.returncode:
                     raise AssertionError(f"route case {Path(path).name}: {result.stdout}\n{result.stderr}")
                 match = re.search(r"routes: (\d+) checks, 0 failures", result.stdout)
                 if not match:
                     raise AssertionError(result.stdout)
                 total += int(match[1])
+                if traced:
+                    lines = result.stderr.splitlines()
+                    expected = [
+                        r'net: dns normalized=nncs2-lp1\.n\.n\.srv\.nintendo\.net rule=exact:nncs2-lp1\.n\.n\.srv\.nintendo\.net ipv4=127\.0\.0\.1',
+                        r'net: dns normalized=deep\.scope\.invalid rule=suffix:scope\.invalid ipv4=127\.0\.0\.2',
+                        rf'net: tls session=\d+ trust=scoped-ca sha256={digest} verify=ok code=0 reason=-',
+                        r'net: tls session=\d+ host=api\.console\.invalid sni=api\.console\.invalid alpn=- offered=- handshake=ok result=0x00000000 native=0',
+                        r'net: tls session=\d+ trust=scoped-ca sha256=[a-f0-9]{64} verify=error code=-?\d+ reason=strict-x509-rejected',
+                    ]
+                    for pattern in expected:
+                        if not any(re.fullmatch(pattern, line) for line in lines):
+                            raise AssertionError(f'missing {pattern!r}\n{result.stderr}')
+                    for operation, endpoint in [('sendto', 'dst'), ('recvfrom', 'src')]:
+                        counts = [int(m[1]) for line in lines if (m := re.fullmatch(
+                            rf'net: udp {operation} guest_fd=\d+ {endpoint}=127\.0\.0\.1:\d+ packets=(\d+)', line))]
+                        if counts != [*range(1, 17), 64]:
+                            raise AssertionError(f'incorrect {operation} sampling: {counts}')
+                    if 'unlogged-payload' in result.stderr or 'HELLO' in result.stderr:
+                        raise AssertionError('network trace must not contain stream or datagram contents')
             for path,reject,handoff in pin_configs:
-                result=subprocess.run([str(executable),str(path),'0',str(pin_listener.getsockname()[1]),'reject-pin' if reject else 'handoff' if handoff else 'v2'],text=True,capture_output=True,timeout=15)
+                result=subprocess.run([str(executable),str(path),'0',str(pin_listener.getsockname()[1]),'reject-pin' if reject else 'handoff' if handoff else 'v2'],text=True,capture_output=True,timeout=15,env=dict(os.environ, DM_NET_TRACE='0'))
                 if result.returncode: raise AssertionError(f'enrolled leaf {path.name}: {result.stdout}\n{result.stderr}')
                 match = re.search(r'routes: (\d+) checks, 0 failures',result.stdout)
                 if match is None: raise AssertionError(result.stdout)

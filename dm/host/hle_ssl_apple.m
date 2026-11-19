@@ -6,6 +6,7 @@
 #import <Security/Security.h>
 #include "nextendo_x509.h"
 #import <Security/SecureTransport.h>
+#include <CommonCrypto/CommonDigest.h>
 #include "ssl_backend.h"
 #include "net_socket.h"
 #include "ssl_trace.h"
@@ -55,7 +56,7 @@ void dm_guest_host_wait_end(void);
 @property(nonatomic) BOOL policyPinned;
 @property(nonatomic) unsigned ioMode, verifyOptions, sessionCache, timeout;
 @property(nonatomic) BOOL certificateChain, enableAlpn, handshaking, established, verified, rejected;
-@property(nonatomic) BOOL tracedRead, tracedWrite;
+@property(nonatomic) BOOL tracedRead, tracedWrite, tracedHandshake;
 @property(atomic) BOOL doNotClose;
 @property(atomic) uint32_t lastError, verifyError;
 @property(nonatomic) NSMutableData *lookahead;
@@ -416,7 +417,7 @@ uint32_t dm_ssl_get_option(void *object, void *out, int option) { @autoreleasepo
     memcpy(out, &value, 1); [c.lock unlock]; return 0;
 } }
 
-static uint32_t prepare(DmTlsConnection *c) {
+static uint32_t prepare(DmTlsConnection *c, OSStatus *native) {
     if (atomic_load(&c->closed)) return error(c, DM_SSL_BAD_SOCKET);
     if (c.rejected) return error(c, DM_SSL_FAIL);
     if (atomic_load(&c->descriptor) < 0) return error(c, DM_SSL_NO_SOCKET);
@@ -437,18 +438,66 @@ static uint32_t prepare(DmTlsConnection *c) {
     [c.context.lock lock]; NSArray *identity = c.context.clientIdentity; [c.context.lock unlock];
     if (!s && identity.count) s = SSLSetCertificate(c->tls, (__bridge CFArrayRef)identity);
     c.handshaking = YES; uint32_t result = status_result(c, s);
+    *native = s;
     trace(c, DM_TLS_PREPARE, result, s, v); return result;
 }
+static BOOL verify_trace(DmTlsConnection *c, BOOL valid, CFIndex code, const char *reason, const char *trust) {
+    if (dm_net_trace_enabled()) {
+        int saved = errno;
+        char hash[65] = "-";
+        if (c.policyAnchor) {
+            unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+            CC_SHA256(c.policyAnchor.bytes, (CC_LONG)c.policyAnchor.length, digest);
+            for (size_t i = 0; i < sizeof digest; i++) snprintf(hash + 2 * i, 3, "%02x", (unsigned)digest[i]);
+        }
+        fprintf(stderr, "net: tls session=%" PRIu64 " trust=%s sha256=%s verify=%s code=%ld reason=%s\n",
+                c.identifier, trust, hash, valid ? "ok" : "error", (long)code, reason);
+        errno = saved;
+    }
+    return valid;
+}
+static const char *trace_tls_name(NSString *name) {
+    const char *s = name.UTF8String;
+    if (!s || !*s) return "-";
+    return strspn(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-:") == strlen(s) ? s : "<invalid>";
+}
+// ALPN is an opaque guest-provided byte string. Don't print custom values.
+static const char *trace_alpn(NSString *protocol) {
+    if (!protocol.length) return "-";
+    if ([protocol isEqualToString:@"h2"]) return "h2";
+    if ([protocol isEqualToString:@"http/1.1"]) return "http/1.1";
+    return "<other>";
+}
+static uint32_t handshake_trace(DmTlsConnection *c, uint32_t result, OSStatus status) {
+    if (result != DM_SSL_WOULD_BLOCK && !c.tracedHandshake && dm_net_trace_enabled()) {
+        c.tracedHandshake = c.handshaking;
+        int saved = errno;
+        CFArrayRef protocols = NULL;
+        NSString *alpn = nil;
+        if (!result && !SSLCopyALPNProtocols(c->tls, &protocols) && protocols && CFArrayGetCount(protocols))
+            alpn = (__bridge NSString *)CFArrayGetValueAtIndex(protocols, 0);
+        fprintf(stderr, "net: tls session=%" PRIu64 " host=%s sni=%s alpn=%s offered=%s handshake=%s result=0x%08" PRIx32 " native=%d\n",
+                c.identifier, trace_tls_name(c.hostname), trace_tls_name(c.peerName), trace_alpn(alpn),
+                trace_alpn(c.enableAlpn ? c.alpn.firstObject : nil), result ? "error" : "ok", result, (int)status);
+        if (protocols) CFRelease(protocols);
+        errno = saved;
+    }
+    return result;
+}
 static BOOL verify_peer(DmTlsConnection *c) {
-    SecTrustRef trust = NULL; if (SSLCopyPeerTrust(c->tls, &trust) || !trust) return NO;
+    BOOL scoped_only = c.policyAnchor && dm_nextendo_x509_available();
+    const char *anchors_used = c.policyPinned ? "pinned-leaf" : scoped_only ? "scoped-ca" : c.policyAnchor ? "system+guest+scoped-ca" : "system+guest";
+    SecTrustRef trust = NULL; OSStatus copied = SSLCopyPeerTrust(c->tls, &trust);
+    if (copied || !trust) return verify_trace(c, NO, copied ? copied : errSSLXCertChainInvalid, "peer-trust-unavailable", anchors_used);
     if (c.policyPinned) {
         SecCertificateRef leaf = SecTrustGetCertificateAtIndex(trust, 0);
         NSData *der = leaf ? CFBridgingRelease(SecCertificateCopyData(leaf)) : nil;
         BOOL valid = der.length && dm_nextendo_x509_verify_pin(c.peerName.UTF8String,
             c.policyAnchor.bytes, c.policyAnchor.length, der.bytes, der.length);
-        CFRelease(trust); return valid;
+        CFRelease(trust);
+        return verify_trace(c, valid, valid ? 0 : errSSLXCertChainInvalid, valid ? "-" : "enrolled-leaf-rejected", anchors_used);
     }
-    if (c.policyAnchor && dm_nextendo_x509_available()) {
+    if (scoped_only) {
         // The route's explicit private CA is the sole authority for this path.
         // BasicX509 retains Apple's chain/time/trust checks; OpenSSL adds strict
         // server purpose, SAN-only hostname, constraints and strength checks.
@@ -479,7 +528,9 @@ static BOOL verify_peer(DmTlsConnection *c) {
                 c.policyAnchor.length, chain, sizes, (size_t)count);
         }
         dm_guest_host_wait_end();
-        if (failure) CFRelease(failure); CFRelease(trust); return valid;
+        CFIndex code = result ? result : failure ? CFErrorGetCode(failure) : valid ? 0 : errSSLXCertChainInvalid;
+        const char *reason = result ? "trust-setup" : failure ? "apple-chain-rejected" : valid ? "-" : "strict-x509-rejected";
+        if (failure) CFRelease(failure); CFRelease(trust); return verify_trace(c, valid, code, reason, anchors_used);
     }
     SecPolicyRef policy = SecPolicyCreateSSL(true, (__bridge CFStringRef)c.peerName);
     OSStatus status = policy ? SecTrustSetPolicies(trust, policy) : errSecParam; if (policy) CFRelease(policy);
@@ -490,33 +541,32 @@ static BOOL verify_peer(DmTlsConnection *c) {
     for (NSDictionary *entry in builtin_certificates()) if ([entry[@"status"] unsignedIntValue] == 1 && [entry[@"readable"] boolValue]) {
         NSData *der = entry[@"data"]; [anchors addObjectsFromArray:parse_certificates(der.bytes, (unsigned)der.length, 2)];
     }
-    if (c.policyAnchor) { NSArray *scoped = parse_certificates(c.policyAnchor.bytes, (unsigned)c.policyAnchor.length, 2); if (!scoped) { CFRelease(trust); return NO; } [anchors addObjectsFromArray:scoped]; }
+    if (c.policyAnchor) { NSArray *scoped = parse_certificates(c.policyAnchor.bytes, (unsigned)c.policyAnchor.length, 2); if (!scoped) { CFRelease(trust); return verify_trace(c, NO, errSecParam, "invalid-scoped-anchor", anchors_used); } [anchors addObjectsFromArray:scoped]; }
     if (!status && anchors.count) { status = SecTrustSetAnchorCertificates(trust, (__bridge CFArrayRef)anchors); if (!status) status = SecTrustSetAnchorCertificatesOnly(trust, false); }
     CFErrorRef failure = NULL; dm_guest_host_wait_begin(); BOOL valid = !status && SecTrustEvaluateWithError(trust, &failure); dm_guest_host_wait_end();
-    if (failure) CFRelease(failure); CFRelease(trust); return valid;
+    CFIndex code = status ? status : failure ? CFErrorGetCode(failure) : valid ? 0 : errSSLXCertChainInvalid;
+    const char *reason = status ? "trust-setup" : valid ? "-" : "apple-chain-or-hostname-rejected";
+    if (failure) CFRelease(failure); CFRelease(trust); return verify_trace(c, valid, code, reason, anchors_used);
 }
 static uint32_t handshake_locked(DmTlsConnection *c) {
     if (c.established) return 0;
-    uint32_t result = prepare(c); if (result) return result;
+    OSStatus native = 0;
+    uint32_t result = prepare(c, &native); if (result) return handshake_trace(c, result, native);
     uint64_t deadline = clock_ms() + c.timeout;
     for (;;) {
-        if (atomic_load(&c->closed)) return error(c, DM_SSL_BAD_SOCKET);
+        if (atomic_load(&c->closed)) return handshake_trace(c, error(c, DM_SSL_BAD_SOCKET), errSSLClosedAbort);
         c->wanted = POLLIN; OSStatus status = SSLHandshake(c->tls);
-        if (status == errSSLServerAuthCompleted) {
+        if (status == errSSLServerAuthCompleted || (!status && !c.verified)) {
             BOOL valid = verify_peer(c); trace(c, DM_TLS_VERIFY, valid ? 0 : DM_SSL_FAIL, status, 0);
-            if (!valid) { c.rejected = YES; c.verifyError = DM_SSL_FAIL; SSLSetError(c->tls, errSSLXCertChainInvalid); return error(c, DM_SSL_FAIL); }
+            if (!valid) { c.rejected = YES; c.verifyError = DM_SSL_FAIL; SSLSetError(c->tls, errSSLXCertChainInvalid); return handshake_trace(c, error(c, DM_SSL_FAIL), errSSLXCertChainInvalid); }
             c.verified = YES;
-            continue;
+            if (status) continue;
         }
         if (!status) {
-            if (!c.verified) {
-                BOOL valid = verify_peer(c); trace(c, DM_TLS_VERIFY, valid ? 0 : DM_SSL_FAIL, status, 0);
-                if (!valid) { c.rejected = YES; c.verifyError = DM_SSL_FAIL; SSLSetError(c->tls, errSSLXCertChainInvalid); return error(c, DM_SSL_FAIL); }
-            }
-            c.verified = YES; c.established = YES; trace(c, DM_TLS_HANDSHAKE, 0, 0, 0); return error(c, 0);
+            c.established = YES; trace(c, DM_TLS_HANDSHAKE, 0, 0, 0); return handshake_trace(c, error(c, 0), 0);
         }
-        if (status != errSSLWouldBlock || c.ioMode == 2) { uint32_t r = status_result(c, status); trace(c, DM_TLS_HANDSHAKE, r, status, 0); return r; }
-        result = wait_socket(c, c->wanted, deadline); if (result) return result;
+        if (status != errSSLWouldBlock || c.ioMode == 2) { uint32_t r = status_result(c, status); trace(c, DM_TLS_HANDSHAKE, r, status, 0); return handshake_trace(c, r, status); }
+        result = wait_socket(c, c->wanted, deadline); if (result) return handshake_trace(c, result, status);
     }
 }
 uint32_t dm_ssl_handshake(void *object) { @autoreleasepool {

@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import os
 from pathlib import Path
+import re
 import socket
 import ssl
 import subprocess
@@ -101,9 +102,13 @@ def main():
         listener = threading.Thread(target=accept, daemon=True)
         listener.start()
         try:
-            result = subprocess.run([str(executable), str(root / "ca.pem"), str(root / "ca.der"), str(server.getsockname()[1]), str(root / "client.p12"), str(root / "system_data")], timeout=45)
+            result = subprocess.run([str(executable), str(root / "ca.pem"), str(root / "ca.der"), str(server.getsockname()[1]), str(root / "client.p12"), str(root / "system_data")],
+                                    timeout=45, env=dict(os.environ, DM_NET_TRACE="1"), stderr=subprocess.PIPE, text=True)
             if result.returncode:
+                print(result.stderr)
                 return result.returncode
+            if not re.search(r"host=localhost sni=localhost alpn=http/1\.1 offered=h2 handshake=ok result=0x00000000 native=0$", result.stderr, re.MULTILINE):
+                raise AssertionError("negotiated ALPN was not logged\n" + result.stderr)
             if "localhost" not in names:
                 raise AssertionError("server never received the expected SNI")
             print("native TLS server: hostname/SNI observed; no user credentials or system trust store used")

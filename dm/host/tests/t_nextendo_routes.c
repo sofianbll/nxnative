@@ -14,6 +14,22 @@ static _Atomic unsigned waits;
 void dm_guest_host_wait_begin(void) { atomic_fetch_add(&waits, 1); }
 void dm_guest_host_wait_end(void) {}
 typedef struct { uint8_t length, family; uint16_t port; uint32_t address; uint8_t padding[8]; } Address;
+static void udp_trace_checks(void) {
+    int fd = dm_net_socket(2, 2, 17);
+    Address a = {16, 2, 0, htonl(INADDR_LOOPBACK), {0}}; unsigned size = sizeof a;
+    CHECK(fd >= 0 && dm_net_bind(fd, &a, size) == 0 && dm_net_name(fd, &a, &size, 0) == 0,
+          "trace test binds a native loopback UDP socket");
+    unsigned timeout = 250; char bytes[32];
+    CHECK(dm_net_sockopt(fd, 0xffff, 0x1006, &timeout, &(unsigned){sizeof timeout}, 1) == 0,
+          "trace test bounds UDP receive waits");
+    for (unsigned i = 0; i < 65; ++i) {
+        static const char sample[] = "unlogged-payload";
+        CHECK(dm_net_send(fd, sample, sizeof sample, 0, &a, size) == sizeof sample &&
+              dm_net_recv(fd, bytes, sizeof bytes, 0, NULL, NULL) == sizeof sample,
+              "metadata sampling does not change UDP loopback delivery");
+    }
+    dm_net_close(fd);
+}
 static void resolve_checks(int ready) {
     dm_net_addrinfo hint = {.family = 2, .type = 1, .protocol = 6, .flags = 2}; void *output = (void *)1;
     CHECK(dm_net_getaddrinfo("never-configured.nintendo.net", "443", &hint, &output) == 8 && output == NULL, "unconfigured Nintendo hostname is refused before native DNS");
@@ -118,7 +134,7 @@ int main(int argc, char **argv) {
     resolve_checks(status == 0);
     setenv("DM_NETWORK", "auto", 1); resolve_checks(status == 0);
     tls_checks(status == 0, argc >= 4 ? (unsigned)strtoul(argv[3],NULL,10) : 0, argc == 5 && !strcmp(argv[4], "reject-pin"));
-    if (argc == 5 && !strcmp(argv[4], "v2")) v2_checks();
+    if (argc == 5 && !strcmp(argv[4], "v2")) { v2_checks(); if (dm_net_trace_enabled()) udp_trace_checks(); }
     if (argc == 5 && !strcmp(argv[4], "handoff")) handoff_checks((unsigned)strtoul(argv[3], NULL, 10));
     unsetenv("DM_NEXTENDO_ROUTES"); setenv("DM_NETWORK", "auto", 1);
     dm_net_addrinfo local_hint = {.family=2,.type=1}; void *local_answer = NULL;
