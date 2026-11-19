@@ -68,7 +68,6 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_vi_history $(QUIET)
 	$(B)/t_nfc
 	$(B)/t_motion
-	$(B)/t_mods
 	$(B)/t_motion_apple
 	$(B)/t_pad_apple
 	$(B)/t_account
@@ -104,8 +103,8 @@ $(B)/t_server_environment: t_server_environment.c ../hle_offline.c ../hle_net.h 
 .PHONY: server-environment
 server-environment: $(B)/t_server_environment
 	$(B)/t_server_environment
-$(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle_mods.c ../mods.h ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_symbols.c ../hle_mods.c
+$(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_symbols.c
 .PHONY: symbols
 symbols: $(B)/t_symbols
 	$(B)/t_symbols
@@ -127,14 +126,8 @@ $(B)/t_system_event: t_system_event.c ../hle_thread.c ../hle_sdk16.c ../hle_misc
 .PHONY: system-event
 system-event: $(B)/t_system_event
 	$(B)/t_system_event
-run: $(B)/t_mods
-$(B)/t_mods: t_mods.c ../hle_mods.c ../mods.h | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_mods.c
-.PHONY: mods
-mods: $(B)/t_mods
-	$(B)/t_mods
-$(B)/t_nro: t_nro.c ../loader.c ../hle_ro.c ../hle_mods.c ../mods.h ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_nro.c ../hle_mods.c
+$(B)/t_nro: t_nro.c ../loader.c ../hle_ro.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_nro.c
 .PHONY: nro
 nro: $(B)/t_nro
 	$(B)/t_nro

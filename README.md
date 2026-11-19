@@ -85,8 +85,6 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys
 
 The IPA appears in the game's folder. The first build takes 30–60 minutes and needs free disk space of about twice the game's size plus 10 GB; building again is much faster.
 
-For a Mac build with code mods, add `--mods <mod folder>`: ExeFS `.pchtxt`, IPS and IPS32 patches are built into a switchable second copy of the modules ([Mods](docs/playing.md#code-mods-on-the-mac)).
-
 To play on the Mac instead, add `--platform mac-app`: you get a Mac app of the game to open from Finder. All options: [The packing script in detail](docs/development.md#the-packing-script-in-detail).
 
 ### Install

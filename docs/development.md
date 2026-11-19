@@ -121,13 +121,8 @@ python3 scripts/cheat_anchor.py check FFCC.cheats.toml --nso <ExeFS/main>    # t
   - `import` refuses a file named after another build unless `--assume-build`; its unanchored cheats then stay bound to the file's own build. A file named after the game's title ID names no build, so it is taken as written for the NSO's build. `import` also counts the writes into the code that put back the word already there (restore entries): evidence that the file belongs to the NSO's build.
 - **Not yet:** `min` / `max` and never-decrease through pointer chains, anchors by IL2CPP names. Validation on FFCC and 13 Sentinels: [Cheats carried across game updates](reference/rewriter.md#cheats-carried-across-game-updates).
 
-## Code mods on the Mac
-
-`--mods <folder>` (`MODS` in Spyder), repeated or comma-separated, builds ExeFS code patches into `--platform mac` and `mac-app`. A folder is a mod (`exefs/` of `.pchtxt` or `.ips`, IPS32 included), a folder of mods, or an Atmosphère, Ryujinx or yuzu tree (`dm/tools/mods.py`). Files whose build ID does not match are skipped. A mod with no matching patch, replacement code modules, a patch over a registered cut or outside the image, and two patch files that overlap all stop the build (`dm/tools/exefs_mods.py`, `patch_nso.py`).
-
-The modules are rewritten normally and again with every patch in `DM_EXEFS_PATCHES`, after registered cuts and before instruction rewriting. The changed modules go into the app's `Resources/dm/codemods` (`dm/mac/pack_app.py`). The Mac loader takes that copy only while every staged code mod is on, so the original remains available. `DM_MODS_OFF=<name>[/<name>…]` switches them together. The build stages only each mod's `dm_code.tsv` in `<build folder>/mods`, packed as `Resources/dm/mods` by `dm/mac/pack_app.py`. It deliberately stages no RomFS: NX2Apple's existing `DM_ROMFS_OVERLAY` remains the only RomFS path. This carry does not include PR #883's run-time RomFS scanner, mod `env.txt`, iOS embedding or per-mod independent code switches.
-
 ## Guest memory SVCs
+
 `dm/host/hle_svc.c` serializes heap resizing, physical map/unmap, stack
 map/unmap and memory queries with one memory-state lock. The alias bitmap is
 the source of committed/free runs for `QueryMemory` and of committed-byte

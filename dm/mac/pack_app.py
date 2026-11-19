@@ -398,8 +398,7 @@ def pack(a):
             if key_file.is_file(): os.replace(key_file, set_aside)
     try:
         a = argparse.Namespace(**vars(a))
-        a.game_mods = getattr(a, 'game_mods', None)
-        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'html', 'control_nacp', 'game_mods'):
+        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'html', 'control_nacp'):
             if getattr(a, name): setattr(a, name, str(Path(getattr(a, name)).resolve()))
         mods, msls, pso, tables, pairs, fonts, files = selected_inputs(a)
         # --program: the other programs of a game of several programs (index, rewritten modules, RomFS, shader libraries, tables, offline pages; tab-separated), which go in beside the first's as one app
@@ -424,7 +423,7 @@ def pack(a):
             return [['.', *as_packed([p, *rows[0][1:]], last.get(p), moved)[1:]]] if Path(p).is_file() and len(rows) == 1 else rows
         romfs_rows = tree(a.romfs)
         inputs = {'options': vars(a), 'files': [as_packed(file_row(p, True), last.get(str(p)), moved) if p in large else file_row(p) for p in files + sources],
-                  'trees': [(p, romfs_rows if p == a.romfs else inventory(Path(p))) for p in (a.romfs, a.aoc, a.html, a.game_mods, str(Path(a.patched) / 'codemods'), str(Path(a.romfs).parent / PROGRAM_ROMFS), *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
+                  'trees': [(p, romfs_rows if p == a.romfs else inventory(Path(p))) for p in (a.romfs, a.aoc, a.html, str(Path(a.romfs).parent / PROGRAM_ROMFS), *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
                   'tools': [[str(c), c.stat().st_mode, c.stat().st_size, c.stat().st_mtime_ns, c.stat().st_ctime_ns, run([c, '--version']).strip()] for c in (clang, swiftc)] + [
                             str(sdk), run(['xcrun', '--sdk', 'macosx', '--show-sdk-version']).strip(),
                             str(codesign), codesign.stat().st_mode, digest(codesign), minos]}
@@ -449,9 +448,7 @@ def pack(a):
     romfs, msl, aoc = Path(a.romfs), Path(a.msl), Path(a.aoc) if a.aoc else None
     # each source is probed on its own, as they may lie on different volumes; cp -c copies what it cannot clone, so a probe decides only the free-space check and the step line
     sib = romfs.parent / PROGRAM_ROMFS   # the RomFS of the application's other programs, beside this one's where the host mounts them by program index (hle_fs.c; scripts/pack_nup.py)
-    code = Path(a.patched) / 'codemods'
-    trees = {'romfs': romfs, 'aoc': aoc, 'programs': sib if sib.is_dir() else None, 'code': code if code.is_dir() else None, 'mod_meta': Path(a.game_mods) if a.game_mods else None}
-    lists = {'mods': mods, 'msl': msls, 'pso': pso}
+    trees, lists = {'romfs': romfs, 'aoc': aoc, 'programs': sib if sib.is_dir() else None}, {'mods': mods, 'msl': msls, 'pso': pso}
     clone = {k: bool(d) and can_clone(d, res) for k, d in trees.items()} | {k: bool(ps) and can_clone(ps[0], res) for k, ps in lists.items()}
     if is_chain_library(msl): clone['msl'] = False   # copy_msl writes it, which the free-space check below counts
     need = sum(tree_bytes(d) for k, d in trees.items() if d and not clone[k]) + sum(p.stat().st_size for k, ps in lists.items() if not clone[k] for p in ps)
@@ -462,8 +459,6 @@ def pack(a):
     build_launcher(mac / EXE, minos, clang, swiftc, sdk)
     shutil.copy(a.host, mac / 'dmhost')   # data and mode, not the build's extended attributes (copy2 would carry them into the app)
     copy(mods, dm, clone['mods'])
-    if trees['code']: copy([code], dm / 'codemods', clone['code'])   # modules rewritten with code patches
-    if trees['mod_meta']: copy([trees['mod_meta']], dm / 'mods', clone['mod_meta'])   # dm_code.tsv switch metadata, never RomFS
     if tables: copy(tables, dm, False)
     if pairs: shutil.copyfile(pairs, dm / 'pso_pairs.tsv')   # the split's copy, for a profile without the table
     if fonts: copy(fonts, dm / 'font', False)
@@ -559,7 +554,6 @@ def parse(argv):
     ap.add_argument('--tables', required=True, help='the game profile folder (shader_map.tsv and the tables beside it)')
     ap.add_argument('--font', required=True, help='the folder of the shared-font stand-ins (nintendo_ext.ttf)')
     ap.add_argument('--aoc', help='the DLC RomFS images or folders by index')
-    ap.add_argument('--game-mods', help='code-mod switch metadata staged by dm/tools/mods.py (Resources/dm/mods; no RomFS)')
     ap.add_argument('--pso', help='the pipeline archive made offline for this Mac (pso_offline.py --platform macos output: <arch>.mtl4a, prebuilt.tsv)')
     ap.add_argument('--pso-pairs', help='pso_pairs.tsv for a profile that has none (the shader split\'s copy)')
     ap.add_argument('--html', help='the offline HTML pages (nx_extract --html), which go beside the RomFS')
