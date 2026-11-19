@@ -1,6 +1,8 @@
 """Public Nextendo service profiles (dm/tools/nextendo_services.py), after NX-Port-Studio's test (MIT); no account state, no network."""
+import base64
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -12,9 +14,43 @@ spec = importlib.util.spec_from_file_location('nextendo_services', REPO / 'dm/to
 assert spec is not None and spec.loader is not None
 n = importlib.util.module_from_spec(spec); spec.loader.exec_module(n)
 WONDER = '010015100b514000'
+ZA = '0100f43008c44000'
 
 
 class NextendoServicesTests(unittest.TestCase):
+    def test_za_only_trusts_its_dedicated_ca_for_its_exact_npln_host(self):
+        value = n.contract(REPO); ca = b'synthetic provider'; dedicated = b'synthetic dedicated CA'
+        value['provider']['caSHA256'] = hashlib.sha256(ca).hexdigest()
+        authority = value['serviceCAs']['legends-za']
+        digest = authority['caSHA256'] = hashlib.sha256(dedicated).hexdigest()
+        filename = digest + '.der'
+        mk8 = '0100152000022000'
+        base = dict(value, titles={k: v for k, v in value['titles'].items() if k != ZA})
+        self.assertEqual(n.rules(value, mk8), n.rules(base, mk8))
+        pem = b'-----BEGIN CERTIFICATE-----\n' + base64.b64encode(dedicated) + b'\n-----END CERTIFICATE-----'
+        with tempfile.TemporaryDirectory() as folder, patch.object(n.Path, 'home', return_value=Path(folder)), patch.object(n, 'contract', return_value=value):
+            root = Path(folder)
+            with patch.object(n.urllib.request, 'urlopen', return_value=io.BytesIO(pem)) as fetch:
+                other = n.prepare(REPO, mk8, root / 'mk8', ca=ca)
+                self.assertFalse((other / filename).exists())
+                out = n.prepare(REPO, ZA, root / 'za', ca=ca)
+                self.assertEqual(fetch.call_count, 1)
+                self.assertEqual(fetch.call_args.args[0].full_url, authority['caURL'])
+            rows = [r.split('\t') for r in (out / 'routes.tsv').read_text().splitlines()[1:]]
+            self.assertEqual([r for r in rows if r[4] == filename], [[
+                'exact', 't-4e44e7a0-lp1.lp1.t.npln.srv.nintendo.net', value['provider']['server'], '@host', filename, digest]])
+            self.assertEqual(next(r[4] for r in rows if r[1] == 'nintendo.net'), 'provider-ca.der')
+            self.assertEqual(json.loads((out / 'manifest.json').read_text())['files'][filename], digest)
+            self.assertEqual((out / filename).read_bytes(), dedicated)
+            cached = root / 'Library/Application Support/nxnative/nextendo' / ('public-' + filename)
+            self.assertEqual(cached.stat().st_mode & 0o777, 0o600)
+            with patch.object(n.urllib.request, 'urlopen', side_effect=AssertionError('unexpected download')):
+                n.prepare(REPO, ZA, root / 'cached', ca=ca)
+            authority['caSHA256'] = '0' * 64
+            with patch.object(n.urllib.request, 'urlopen', return_value=io.BytesIO(pem)), self.assertRaisesRegex(ValueError, 'integrity'):
+                n.prepare(REPO, ZA, root / 'bad', ca=ca)
+            self.assertFalse((root / 'bad').exists())
+
     def test_shared_families_and_title_scoped_services(self):
         value = n.contract(REPO)
         self.assertIn('suffix\tdemonware.net\t', n.rules(value, '01001b300b9be000'))

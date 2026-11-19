@@ -7,6 +7,12 @@
     "caURL": "https://git.nextendo.network/api/v1/repos/NextendoNetwork/Prelude-Nextendo/raw/romfs/sd/rootCA.pem?ref=ba4af9fa8f0558b45bad047bedd07ff879c6ce4e",
     "caSHA256": "a654c0eff8aa20a72280ea0ef2b5c2a17392922dd78ffbb113862e1ad2c66d49"
   },
+  "serviceCAs": {
+    "legends-za": {
+      "caURL": "https://wiki.nextendo.network/media/certs/nextendo-pokemon-legends-za-ca.pem",
+      "caSHA256": "6391c69d6d01c3bcc39c30b261e16eab20242de4c14cfd80a4445dd304ad0722"
+    }
+  },
   "base": [
     {
       "match": "label",
@@ -102,6 +108,15 @@
     ]
   },
   "titles": {
+    "0100f43008c44000": [
+      {
+        "match": "exact",
+        "host": "t-4e44e7a0-lp1.lp1.t.npln.srv.nintendo.net",
+        "server": "server",
+        "tls": true,
+        "ca": "legends-za"
+      }
+    ],
     "0100fcf002a58000": [
       {
         "match": "exact",

@@ -1,6 +1,6 @@
 """From RobiiAragon/NX-Port-Studio dm/tools/nextendo_services.py @ bd13a49b (MIT): the public Nextendo service profile for one game.
 
-Writes routes.tsv (DM_NEXTENDO_ROUTES, dm/host/hle_nextendo_routes.c), provider-ca.der, the pinned server certificates its routes name
+Writes routes.tsv (DM_NEXTENDO_ROUTES, dm/host/hle_nextendo_routes.c), public CA certificates and the pinned server certificates its routes name
 (<SHA-256>.der, from dm/net/nextendo-pins) and manifest.json into a folder.
 
 Only public service facts, the provider's authenticated public CA and certificates Nextendo's servers present to any client are used.
@@ -12,6 +12,8 @@ import hashlib
 import ipaddress
 import json
 import re
+import stat
+import tempfile
 import urllib.request
 
 
@@ -22,31 +24,35 @@ def contract(repository):
         address = ipaddress.IPv4Address(value['provider'][name])
         if address.is_unspecified or address.is_multicast or address.is_loopback: raise ValueError('Invalid public Nextendo service address')
     if not re.fullmatch('[0-9a-f]{64}', value['provider']['caSHA256']): raise ValueError('Invalid provider CA digest')
+    for name, ca in value.get('serviceCAs', {}).items():
+        if not re.fullmatch('[a-z0-9-]{1,32}', name) or name == 'provider' or not re.fullmatch('[0-9a-f]{64}', ca['caSHA256']):
+            raise ValueError('Invalid service CA identity or digest')
     return value
 
 
-def provider_ca(value):
-    cache = Path.home() / 'Library/Application Support/nxnative/nextendo/public-provider-ca.der'
-    if cache.is_file() and not cache.is_symlink() and cache.stat().st_size <= 65536:
-        data = cache.read_bytes()
-        if hashlib.sha256(data).hexdigest() == value['provider']['caSHA256']: return data
-    url = value['provider']['caURL']
+def public_ca(authority, filename):
+    cache = Path.home() / 'Library/Application Support/nxnative/nextendo' / ('public-' + filename)
+    digest = authority['caSHA256']
+    if cache.is_file() and not cache.is_symlink() and stat.S_IMODE(cache.stat().st_mode) == 0o600:
+        with cache.open('rb') as source: data = source.read(65537)
+        if len(data) <= 65536 and hashlib.sha256(data).hexdigest() == digest: return data
+    url = authority['caURL']
     # Nextendo's own Git server, where Prelude-Nextendo moved from GitHub (the old raw.githubusercontent.com address is 404); the SHA-256 below is the trust, not the host
     # The web UI's raw/commit/ links now answer 403 to scripts; its API serves the same file pinned to the same commit (?ref=<sha>)
     if not url.startswith(('https://git.nextendo.network/NextendoNetwork/Prelude-Nextendo/raw/commit/',
-                           'https://git.nextendo.network/api/v1/repos/NextendoNetwork/Prelude-Nextendo/raw/')):
-        raise ValueError('The provider CA must come from its official source')
+                           'https://git.nextendo.network/api/v1/repos/NextendoNetwork/Prelude-Nextendo/raw/',
+                           'https://wiki.nextendo.network/media/certs/')):
+        raise ValueError('The Nextendo CA must come from its official source')
     request = urllib.request.Request(url, headers={'User-Agent': 'nxnative'})
     with urllib.request.urlopen(request, timeout=15) as response: encoded = response.read(65537)
-    if len(encoded) > 65536: raise ValueError('Provider CA exceeds its bounds')
+    if len(encoded) > 65536: raise ValueError('Nextendo CA exceeds its bounds')
     match = re.fullmatch(rb'\s*-----BEGIN CERTIFICATE-----\s*([A-Za-z0-9+/=\r\n]+)\s*-----END CERTIFICATE-----\s*', encoded)
-    if not match: raise ValueError('Expected exactly one public provider certificate')
+    if not match: raise ValueError('Expected exactly one public Nextendo certificate')
     der = base64.b64decode(re.sub(rb'\s', b'', match[1]), validate=True)
-    if hashlib.sha256(der).hexdigest() != value['provider']['caSHA256']:
-        raise ValueError('The public provider CA integrity check failed')
+    if hashlib.sha256(der).hexdigest() != digest:
+        raise ValueError('The public Nextendo CA integrity check failed')
     cache.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not cache.is_symlink():
-        import tempfile
         with tempfile.NamedTemporaryFile(dir=cache.parent, prefix='.ca-', delete=False) as out:
             temporary = Path(out.name)
             try: out.write(der); out.close(); temporary.chmod(0o600); temporary.replace(cache)
@@ -74,6 +80,9 @@ def rules(value, title_id, protocol=None):
         pin = item.get('certificateSHA256')
         if (kind == 'pinned-exact') != (pin is not None) or (pin is not None and (not item['tls'] or not re.fullmatch('[0-9a-f]{64}', pin))):
             raise ValueError('A pinned route needs TLS and exactly one certificate digest')
+        authority = item.get('ca')
+        if authority is not None and (kind != 'exact' or not item['tls'] or authority not in value.get('serviceCAs', {})):
+            raise ValueError('A service CA needs a TLS route for an exact host')
         pattern = host.replace('*', 'x')
         if not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?', pattern) or '..' in pattern:
             raise ValueError('Invalid service route hostname')
@@ -86,7 +95,9 @@ def rules(value, title_id, protocol=None):
             output.append('\t'.join([kind, host, address, host, pin + '.der', pin]))
             if aliases.setdefault(address, (host, pin))[1] != pin: raise ValueError('One address with two pinned certificates')
             continue
-        tail = ['@host', 'provider-ca.der', value['provider']['caSHA256']] if item['tls'] else ['-', '-', '-']
+        ca = value['serviceCAs'][authority] if authority is not None else value['provider']
+        filename = ca['caSHA256'] + '.der' if authority is not None else 'provider-ca.der'
+        tail = ['@host', filename, ca['caSHA256']] if item['tls'] else ['-', '-', '-']
         output.append('\t'.join([kind, host, address] + tail))
     for address, (host, pin) in aliases.items(): output.append('\t'.join(['pinned-address', address, address, host, pin + '.der', pin]))
     if not 0 < len(output) <= 128: raise ValueError('Invalid service route count')
@@ -94,16 +105,19 @@ def rules(value, title_id, protocol=None):
 
 
 def prepare(repository, title_id, destination, protocol=None, ca=None):
-    value = contract(repository); ca = provider_ca(value) if ca is None else ca
+    value = contract(repository); ca = public_ca(value['provider'], 'provider-ca.der') if ca is None else ca
     if hashlib.sha256(ca).hexdigest() != value['provider']['caSHA256']: raise ValueError('Invalid provider CA')
     text = rules(value, title_id, protocol)
     files = {'routes.tsv': text.encode(), 'provider-ca.der': ca}
+    authorities = {item['caSHA256']: item for item in value.get('serviceCAs', {}).values()}
     for line in text.splitlines()[1:]:
         fields = line.split('\t')
-        if fields[0] != 'pinned-exact': continue
-        data = (Path(repository) / PINS / fields[4]).read_bytes()
-        if hashlib.sha256(data).hexdigest() != fields[5]: raise ValueError('A pinned server certificate does not match its digest')
-        files[fields[4]] = data
+        filename = fields[4]
+        if filename == '-': continue
+        if filename not in files:
+            if fields[0] == 'pinned-exact': files[filename] = (Path(repository) / PINS / filename).read_bytes()
+            else: files[filename] = public_ca(authorities[fields[5]], filename)
+        if hashlib.sha256(files[filename]).hexdigest() != fields[5]: raise ValueError('A routed certificate does not match its digest')
     manifest = {'formatVersion': 1, 'titleID': title_id.lower(), 'protocol': protocol,
                 'identity': value.get('identities', {}).get(title_id.lower(), {'account':'pid','friends':'pid'}),
                 'routeCount': len(text.splitlines()) - 1,
