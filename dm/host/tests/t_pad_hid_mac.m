@@ -168,6 +168,7 @@ static void push_report(TestDev *d, const uint8_t *r, size_t n) {
 }
 static void wait_ms(int ms) { advance_timers((uint64_t)ms * NSEC_PER_MSEC); drain(); }
 static void put16(uint8_t *p, int v) { p[0] = (uint8_t)v; p[1] = (uint8_t)((uint16_t)v >> 8); }
+static void put_stick(uint8_t *p, int x, int y) { p[0] = x & 0xff; p[1] = x >> 8 | (y & 0xf) << 4; p[2] = y >> 4; }
 static int twins(void) { int n = 0; for (hid_pad *d = g_hidpads; d; d = d->next) n += d->twin; return n; }
 static hid_pad *find(TestDev *t) { for (int pass = 0; pass < 2; pass++) for (hid_pad *d = pass ? g_hidpads : g_hidpads_gc; d; d = d->next) if (d->hid == ref(t)) return d; return NULL; }
 
@@ -304,6 +305,10 @@ int main(void) { @autoreleasepool {
     g_twins_due = 1; hidpad_models_changed(); g_twins_due = 0;
     assert(twins() == 2 && attached == 2 && hidpad_gc_unread(gc) && g_hidpads->hid == ref(u2));   // by USB location: u1 taken first, so u2 is at the head
     report(u1); report(u2);
+    uint8_t r[64] = {0x30};
+    put_stick(r + 6, 2048 + 1092, 2048); put_stick(r + 9, 2048, 2048);
+    push_report(u1, r, 49);
+    assert(find(u1)->pro_s[0] == DM_STICK_MAX * 84 / 93);   // a genuine HID Pro still scales 91% normally
     // one falls silent (no removal): at the next change it is not counted, so both go back to GameController
     tick += PRO_SILENT_NS; report(u2);
     hidpad_models_changed();
@@ -325,14 +330,33 @@ int main(void) { @autoreleasepool {
     assert(n && attached == 1 && n->proto && (n->nin & PAD_NIN_RUMBLE) && n->st.layout == PAD_HID_NINTENDO && n->st.map[0] == 2 && n->st.map[2] == 4);   // report 0x3F's numbering until then
     assert(nouts == 1 && outs[0][0] == 0x01 && outs[0][1] == JC1_SUB_DEVICE_INFO && nano.callback);
     wait_ms(300); assert(nouts == 2 && outs[1][1] == JC1_SUB_DEVICE_INFO && n->tries == 2);   // no answer yet: asked again
-    uint8_t r[64] = {0x21}; r[13] = 0x82; r[14] = JC1_SUB_DEVICE_INFO;
+    memset(r, 0, sizeof r); r[0] = 0x21; r[13] = 0x82; r[14] = JC1_SUB_DEVICE_INFO;
     push_report(nano, r, 49); assert(n->talks && hidpad_rumbles(n));
     wait_ms(100);
     static const uint8_t hs[8][2] = {{0x03, 0x30}, {0x40, 1}, {0x48, 1}, {0x10, 0x20}, {0x10, 0x3D}, {0x10, 0x10}, {0x30, 0xF0}};   // the handshake, then all four lights flashing
     assert(nouts == 2 + 7 && !n->steps);
     for (int i = 0; i < 7; i++) assert(outs[2 + i][0] == 0x01 && outs[2 + i][1] == hs[i][0] && outs[2 + i][2] == hs[i][1]);
-    memset(r, 0, sizeof r); r[0] = 0x30; r[1] = 1; r[3] = 0x08; for (int k = 0; k < 2; k++) { r[6 + 3 * k] = 0x00; r[7 + 3 * k] = 0x08; r[8 + 3 * k] = 0x80; }   // A, both sticks at 2048
+    memset(r, 0, sizeof r); r[0] = 0x30; r[1] = 1; r[3] = 0x08; put_stick(r + 6, 2048, 2048); put_stick(r + 9, 2048, 2048);   // A, both sticks at rest
     push_report(nano, r, 49); assert(n->full && hidpad_full(n) && n->pro_m == DM_BTN_A && n->pro_s[0] == 0 && n->pro_s[1] == 0);
+    put_stick(r + 6, 2048 + 1092, 2048); push_report(nano, r, 49);
+    assert(n->pro_s[0] == DM_STICK_MAX && n->pro_s[1] == 0);   // 91% of the initial reach
+    put_stick(r + 6, 2048 + 1020, 2048); push_report(nano, r, 49);
+    assert(n->pro_s[0] == DM_STICK_MAX * 78 / 93 && n->pro_s[1] == 0);   // 85% still scales with the original dead zone
+    put_stick(r + 6, 2048 + 60, 2048 - 60); push_report(nano, r, 49);
+    assert(n->pro_s[0] == 0 && n->pro_s[1] == 0);
+    put_stick(r + 6, 2048 + 1500, 2048 - 1500); push_report(nano, r, 49);   // learn the reach in these two directions
+    put_stick(r + 6, 2048 + 819, 2048 - 1092); push_report(nano, r, 49);   // 91% with a 3:-4 direction
+    assert(abs(n->pro_s[0] - DM_STICK_MAX * 3 / 5) <= 1 && abs(n->pro_s[1] + DM_STICK_MAX * 4 / 5) <= 1);
+    put_stick(r + 6, 2048, 2048);
+    uint8_t stick_cal[64] = {0x21}; stick_cal[13] = 0x90; stick_cal[14] = JC1_SUB_SPI_READ;
+    stick_cal[15] = PAD_PRO_SPI_FACTORY & 0xff; stick_cal[16] = PAD_PRO_SPI_FACTORY >> 8; stick_cal[19] = PAD_PRO_SPI_FACTORY_LEN;
+    put_stick(stick_cal + 29, 2000, 2100); put_stick(stick_cal + 32, 1000, 800); put_stick(stick_cal + 35, 1400, 1600);
+    push_report(nano, stick_cal, 20 + PAD_PRO_SPI_FACTORY_LEN); assert(!n->pro.cal[0] && n->pro.cal[1] == 1);
+    put_stick(r + 9, 2000 - 900, 2100); push_report(nano, r, 49);
+    assert(n->pro_s[2] == -DM_STICK_MAX && n->pro_s[3] == 0);   // exactly 90% of the calibrated negative reach
+    put_stick(r + 9, 2000, 2100); push_report(nano, r, 49);
+    assert(n->pro_s[2] == 0 && n->pro_s[3] == 0);
+    puts("Nintendo HID 0x30: full tilt, direction, scaling and dead zone passed");
     // The requested IMU calibration reaches the decoder: factory rest is zero rotation, with each axis's own sensitivity.
     uint8_t cal[64] = {0x21}; cal[13] = 0x90; cal[14] = JC1_SUB_SPI_READ; cal[15] = 0x20; cal[16] = 0x60; cal[19] = JC1_IMU_CAL_LEN;
     const int origin[3] = {100, -50, 25};

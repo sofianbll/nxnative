@@ -220,7 +220,8 @@ static void hidpad_nin_reply(hid_pad *d, const uint8_t *r, size_t n) {
 }
 // A report 0x30: buttons, sticks and gyro, as a Pro Controller's
 static void hidpad_full_report(hid_pad *d, const uint8_t *r, size_t n) {
-    if (!pad_pro_decode(&d->pro, r, n, &d->pro_m, d->pro_s)) return;
+    float outer = d->proto && d->vid != 0x057e ? PAD_HID_RAW_OUTER : 0;
+    if (!pad_pro_decode_outer(&d->pro, r, n, &d->pro_m, d->pro_s, outer)) return;
     if (d->proto) d->pro_m = pad_hid_nin_buttons(&d->st, d->pro_m, r[4]);
     if (!d->pro_logged) { d->pro_logged = 1; LOG("[hid] '%s' at USB location 0x%lx: first report 0x30, sticks at rest %d %d, %d %d", d->name, hidpad_location(d), d->pro.rest[0], d->pro.rest[1], d->pro.rest[2], d->pro.rest[3]); }
     hidpad_read(d);

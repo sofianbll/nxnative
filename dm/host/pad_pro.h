@@ -5,6 +5,7 @@
 // at 0x603D), gives each axis its rest and its reach below and above. Until it answers, or if it never does, each axis measures itself: its rest is the first report's value
 // when that is near the middle (a stick held at that moment is off until the pad is plugged in again), and each reach starts low and grows with what the stick shows.
 #pragma once
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -67,16 +68,18 @@ static inline uint64_t pad_pro_buttons(const uint8_t *r) {
     for (size_t i = 0; i < sizeof map / sizeof *map; i++) if (r[map[i].at] & map[i].bit) m |= map[i].btn;
     return m;
 }
-static inline int32_t pad_pro_axis(pad_pro *s, int a, int raw) {
+static inline int32_t pad_pro_axis(pad_pro *s, int a, int raw, float *ratio) {
     int v = raw - s->rest[a], mag = abs(v), *reach = &s->reach[a][v > 0];
     if (mag > *reach && !s->cal[a / 2]) *reach = mag;   // a calibrated reach stays, and past it reads full
+    if (ratio) *ratio = *reach ? (float)v / *reach : 0;
     int dead = *reach * PAD_PRO_DEAD_PCT / 100;
     if (mag <= dead) return 0;
     int64_t out = (int64_t)(mag - dead) * DM_STICK_MAX / (*reach - dead); if (out > DM_STICK_MAX) out = DM_STICK_MAX;
     return v < 0 ? -(int32_t)out : (int32_t)out;
 }
-// A report of the right kind fills *m and st (left x, y, right x, y) and returns 1; anything else leaves them and returns 0
-static inline int pad_pro_decode(pad_pro *s, const uint8_t *r, size_t len, uint64_t *m, int32_t st[4]) {
+// A report of the right kind fills *m and st (left x, y, right x, y) and returns 1; anything else leaves them and returns 0.
+// Clones may not repeat their full reach: with a nonzero outer threshold, snap to full radius before the dead zone can skew the direction.
+static inline int pad_pro_decode_outer(pad_pro *s, const uint8_t *r, size_t len, uint64_t *m, int32_t st[4], float outer) {
     if (len < 12 || r[0] != 0x30) return 0;
     const int raw[4] = {r[6] | (r[7] & 0x0f) << 8, r[7] >> 4 | r[8] << 4, r[9] | (r[10] & 0x0f) << 8, r[10] >> 4 | r[11] << 4};
     if (!s->seen) {
@@ -84,6 +87,14 @@ static inline int pad_pro_decode(pad_pro *s, const uint8_t *r, size_t len, uint6
         for (int a = 0; a < 4; a++) { s->rest[a] = abs(raw[a] - PAD_PRO_MIDDLE) <= PAD_PRO_REST_MAX ? raw[a] : PAD_PRO_MIDDLE; s->reach[a][0] = s->reach[a][1] = PAD_PRO_REACH_MIN; }
     }
     *m = pad_pro_buttons(r);
-    for (int a = 0; a < 4; a++) st[a] = pad_pro_axis(s, a, raw[a]);
+    float ratio[4];
+    for (int a = 0; a < 4; a++) st[a] = pad_pro_axis(s, a, raw[a], outer ? &ratio[a] : NULL);
+    if (outer) for (int a = 0; a < 4; a += 2) {
+        float x = ratio[a], y = ratio[a + 1], mag = sqrtf(x * x + y * y);
+        if (mag >= outer) { st[a] = (int32_t)lroundf(x * DM_STICK_MAX / mag); st[a + 1] = (int32_t)lroundf(y * DM_STICK_MAX / mag); }
+    }
     return 1;
+}
+static inline int pad_pro_decode(pad_pro *s, const uint8_t *r, size_t len, uint64_t *m, int32_t st[4]) {
+    return pad_pro_decode_outer(s, r, len, m, st, 0);
 }
