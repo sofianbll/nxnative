@@ -7,6 +7,8 @@ void dm_thread_service_connect(void) {}   // threads started so far have nothing
 #include <sys/wait.h>
 #include <unistd.h>
 void mtl_present_screen(uint32_t w, uint32_t h) { (void)w; (void)h; }   // loader.c: a screen taller than 16:9; no renderer here
+static dm_net_mode_t mode;
+dm_net_mode_t dm_net_mode(void) { return mode; }
 
 struct dm_flags g_flag;
 uint64_t now_ns(void) { return 0; }
@@ -55,7 +57,44 @@ static void fixture(int i) {
 static void load(int i) { assert(h_ro_LoadModule(&handles[i - 1], raw[i - 1], NULL, 32, 1) == 0); }
 static void unload(int i) { h_ro_UnloadModule(&handles[i - 1]); assert(!g_mod[i].loaded); }
 
+static void module_variants(void) {
+    char dir[] = "/tmp/nro-variants.XXXXXX", cdir[128], ndir[128], main_mod[160], sdk_mod[160], patch[160], metadata[160];
+    assert(mkdtemp(dir));
+    snprintf(cdir, sizeof cdir, "%s/codemods", dir); assert(!mkdir(cdir, 0700));
+    snprintf(ndir, sizeof ndir, "%s/nextendo", dir); assert(!mkdir(ndir, 0700));
+    snprintf(main_mod, sizeof main_mod, "%s/main.fixups.tsv", cdir);
+    snprintf(sdk_mod, sizeof sdk_mod, "%s/sdk.fixups.tsv", cdir);
+    snprintf(patch, sizeof patch, "%s/main.fixups.tsv", ndir);
+    snprintf(metadata, sizeof metadata, "%s/dm_code.tsv", ndir);
+    for (const char *const *p = (const char *const[]){main_mod, sdk_mod, patch, metadata, NULL}; *p; p++) {
+        FILE *f = fopen(*p, "w"); assert(f && !fclose(f));
+    }
+    assert(!setenv("DM_MODS", dir, 1) && !unsetenv("DM_MODS_OFF"));
+    module_t main = {.name = "main"}, sdk = {.name = "sdk"};
+    nextendo_main(dir);
+    int want = want_code_mods(cdir);
+    assert(!strcmp(module_dir(&main, dir, cdir, want), cdir) && main.code_mods);
+    assert(!strcmp(module_dir(&sdk, dir, cdir, want), cdir) && sdk.code_mods);
+    mode = DM_NET_NEXTENDO;
+    nextendo_main(dir);
+    want = want_code_mods(cdir);
+    assert(!strcmp(module_dir(&main, dir, cdir, want), ndir) && !main.code_mods);
+    assert(!strcmp(module_dir(&sdk, dir, cdir, want), dir) && !sdk.code_mods);
+    assert(!unlink(main_mod));
+    want = want_code_mods(cdir);
+    assert(!strcmp(module_dir(&main, dir, cdir, want), ndir) && !main.code_mods);
+    assert(!strcmp(module_dir(&sdk, dir, cdir, want), cdir) && sdk.code_mods);
+    assert(!unlink(patch)); nextendo_main(dir);
+    assert(!strcmp(module_dir(&main, dir, cdir, want_code_mods(cdir)), dir) && !main.code_mods);
+    assert(!setenv("DM_MODS_OFF", "nextendo", 1) && !want_code_mods(cdir));
+    assert(!unlink(sdk_mod) && !unlink(metadata));
+    assert(!rmdir(ndir) && !rmdir(cdir) && !rmdir(dir));
+    unsetenv("DM_MODS"); unsetenv("DM_MODS_OFF"); mode = DM_NET_OFFLINE;
+    puts("module variants: Nextendo main, all-or-nothing code mods, and no-patch fallback: OK");
+}
+
 int main(void) {
+    module_variants();
     FILE *manifest = tmpfile(); assert(manifest);
     fputs("# NRO manifest\n\nrefused 00 128\n", manifest);
     for (int i = 0; i < 1432; i++) fprintf(manifest, "nro%d 00 128\n", i);

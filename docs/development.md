@@ -127,6 +127,8 @@ python3 scripts/cheat_anchor.py check FFCC.cheats.toml --nso <ExeFS/main>    # t
 
 The modules are rewritten normally and again with every patch in `DM_EXEFS_PATCHES`, after registered cuts and before instruction rewriting. The changed modules go into the app's `Resources/dm/codemods` (`dm/mac/pack_app.py`). The Mac loader takes that copy only while every staged code mod is on, so the original remains available. `DM_MODS_OFF=<name>[/<name>…]` switches them together. The build stages only each mod's `dm_code.tsv` in `<build folder>/mods`, packed as `Resources/dm/mods` by `dm/mac/pack_app.py`. It deliberately stages no RomFS: NX2Apple's existing `DM_ROMFS_OVERLAY` remains the only RomFS path. This carry does not include PR #883's run-time RomFS scanner, mod `env.txt`, iOS embedding or per-mod independent code switches.
 
+`--platform mac --nextendo` prepares its own `main` copy when a signed patch exists for this build. If the Nextendo session loads that copy and the code mods also change `main`, the loader disables the entire code-mod set for the session; it does not combine the two variants. Without this conflict, the usual code-mod switch applies. `--nextendo` is not supported with `--platform mac-app`.
+
 ## Guest memory SVCs
 `dm/host/hle_svc.c` serializes heap resizing, physical map/unmap, stack
 map/unmap and memory queries with one memory-state lock. The alias bitmap is
