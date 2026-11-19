@@ -103,7 +103,7 @@ static int pad_hid_hat(long v, long min, long max) { return v >= min && v <= max
 // One stick: a round dead zone against drift (PAD_HID_DEAD of full deflection), and past it the deflection scaled back to start at 0, so the stick neither jumps to the dead zone's
 // edge nor loses a small x while y is deflected. Each axis is clamped after the scale: a square-gated stick still reaches full x and y in its corners.
 #define PAD_HID_DEAD 0.12f
-// The 0x3F PowerA stick held at full tilt returns 91–97% of its peak, not the peak on every sample.
+// A PowerA stick held at full tilt returns 91–97% of its peak, not the peak on every sample.
 #define PAD_HID_RAW_OUTER 0.9f
 static void pad_hid_stick(float x, float y, float outer, int32_t *ox, int32_t *oy) {
     float r = sqrtf(x * x + y * y);
