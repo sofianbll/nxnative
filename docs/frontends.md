@@ -115,6 +115,8 @@ Cheats are files, not settings: the host (`dm/host/hle_cheats.c`) reads Atmosph√
 
 Mods are files too: the host reads a mods folder, `DM_MODS=<folder>`, else `<DM_ROOT>/mods` ([Mods](development.md#mods) has the layouts it accepts and what it refuses). A front end installs a mod by copying its folder there, and orders or disables mods by writing `order.txt` in it: one mod folder name per line, the highest priority first, `# <name>` for a mod that is off; folders the file does not name are on, after the named ones, in name order. The host reads the folder once, at the start. Each enabled mod's `cheats/<build ID>.txt` joins the cheats folder's own as one list, with one `<build ID>.enabled` and `<build ID>.values` in the cheats folder ([Cheat files from several places](development.md#cheat-files-from-several-places)).
 
+When migrating from `DM_ROMFS_OVERLAY`, list every managed mod in `order.txt` and remove its path from the explicit overlay. Explicit paths always come first and are not switched off by `order.txt`; omitting a mod from the explicit overlay does not switch it off either.
+
 A mod's code patch that the host cannot make at load time needs the module rewritten with it before the host starts: a Mac front end that keeps the original modules runs `dm/tools/mods_rewrite.py` first and starts the host on the folder it prints ([Code patches through the rewriter](development.md#code-patches-through-the-rewriter)); one that does not (the packed `.app`) leaves such patches refused, which the host logs in red (open).
 
 ## An app that hosts the engine

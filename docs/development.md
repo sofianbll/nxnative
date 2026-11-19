@@ -152,7 +152,7 @@ Every `<build ID>.txt` of the running build is loaded as one list (`hle_cheats.c
 
 ### Code patches through the rewriter
 
-`dm/tools/mods_rewrite.py` runs before the host starts and prints the modules folder to start it with. It is a step of the launch path, not of the host: the Mac launch script of a development build calls it (`RUN=$(python3 dm/tools/mods_rewrite.py --game <title ID> --host dm/host/dmhost --modules <patched_v…> --exefs <extract/v…/ExeFS> --cache <folder>)`, with `DM_MODS` or `DM_ROOT` set as for the game).
+`dm/tools/mods_rewrite.py` prints the modules folder to start the host with. Neither the NSP script nor the packed Mac launcher calls it yet. A custom launcher can run it before starting the host (`RUN=$(python3 dm/tools/mods_rewrite.py --game <title ID> --host dm/host/dmhost --modules <patched_v…> --exefs <extract/v…/ExeFS> --cache <folder>)`, with `DM_MODS` or `DM_ROOT` set as for the game).
 
 1. With no `.pchtxt` or `.ips` in the mods folder it prints the modules folder as it is, and starts nothing.
 2. It asks the host which files it refuses: `DM_MODS_CHECK=<file>` makes `dmhost <modules>` load the modules, write its verdict on every patch file of a loaded module's build with the file's patches as image offsets (`hle_mods.c` `check_file`), and end before the game starts (about 0.3 s for Ocarina of Time). The mods that are on, their order, the parsing and the refusal rules are the host's own this way; the tool has no copy of them.

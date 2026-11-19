@@ -587,7 +587,7 @@ void dm_mods_patch_module(module_t *m, const char *dir) {
         if (refused) {
             LOG("[RED] mods: %s: %s is not applied: %d of its %d patches cannot be made in the running image, the first at %s+%#llx, which %s.%s",
                 g_mods[p->mod].name, p->path, refused, rs.n, m->name, (unsigned long long)at, why,
-                final ? "" : " It needs the module rewritten with the patch, which dm/tools/mods_rewrite.py does before the game starts (the launch script of a Mac build calls it)");
+                final ? "" : " It needs the module rewritten with the patch before launch; the launcher must call dm/tools/mods_rewrite.py with the original modules");
             check_file(m, p, final ? "invalid" : "refused", sha, why, final ? NULL : &rs);
         } else {
             for (int k = 0; k < rs.n; k++) {

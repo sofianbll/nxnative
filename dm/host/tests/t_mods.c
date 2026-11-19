@@ -20,6 +20,7 @@ static void puts_file(const char *path, const char *text) { put(path, text, strl
 static uint32_t word_at(const module_t *m, uint64_t off) { uint32_t w; memcpy(&w, m->base + off, 4); return w; }
 
 #define BUILD "0123456789abcdef0123456789abcdef"
+#define SDK_BUILD "99999999999999999999999999999999"
 #define NOP 0xD503201Fu
 
 int main(void) {
@@ -85,12 +86,17 @@ int main(void) {
     puts_file(p, "@nsobid-" BUILD "\n00000180 1F2003D5\n");
     snprintf(p, sizeof p, "%s/mods/Gamma/exefs/other.pchtxt", base);
     puts_file(p, "@nsobid-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\n00000100 1F2003D5\n");
+    snprintf(p, sizeof p, "%s/mods/Gamma/exefs/sdk.pchtxt", base);
+    puts_file(p, "@nsobid-" SDK_BUILD "\n00000160 1F2003D5\n");
     snprintf(p, sizeof p, "%s/dm/main.changed.tsv", base);
     puts_file(p, "# BUILD_ID " BUILD "\n80\t8\n");
+    snprintf(p, sizeof p, "%s/dm/sdk.changed.tsv", base);
+    puts_file(p, "# BUILD_ID " SDK_BUILD "\n");
 
     char check[1536]; snprintf(check, sizeof check, "%s/check.tsv", base); setenv("DM_MODS_CHECK", check, 1);
-    snprintf(p, sizeof p, "%s/mods", base); setenv("DM_MODS", p, 1);
-    setenv("DM_ROMFS_OVERLAY", "/explicit", 1);
+    unsetenv("DM_MODS"); setenv("DM_ROOT", base, 1);
+    char explicit[1536]; snprintf(explicit, sizeof explicit, "%s/mods/Gamma/romfs", base);
+    setenv("DM_ROMFS_OVERLAY", explicit, 1);
     dm_mods_init();
 
     CHECK(g_nmods == 7 && !strcmp(g_mods[0].name, "Gamma") && !strcmp(g_mods[1].name, "Tunics/Pink") && !strcmp(g_mods[2].name, "Alpha") && !strcmp(g_mods[3].name, "Beta")
@@ -101,12 +107,12 @@ int main(void) {
         if (!strcmp(dm_mods_name(i), "Bundle/Hud")) CHECK(!dm_mods_exclusive(i), "a pack's mod with files of its own is no alternative");
         if (!strcmp(dm_mods_name(i), "Bundle/Music2")) CHECK(dm_mods_exclusive(i) && !dm_mods_on(i), "two of a pack with the same file are alternatives");
     }
-    char want[4096]; snprintf(want, sizeof want, "/explicit:%s/mods/Gamma/romfs:%s/mods/Tunics/Pink/romfs:%s/mods/Alpha/romfs:%s/mods/Beta/atmosphere/contents/%s/romfs:%s/mods/Bundle/Hud/romfs:%s/mods/Bundle/Music/romfs:%s/mods/Pack/Blue/romfs", base, base, base, base, tid, base, base, base);
-    CHECK(!strcmp(getenv("DM_ROMFS_OVERLAY"), want), "overlay list: the explicit folder, then the mods in order");
+    char want[4096]; snprintf(want, sizeof want, "%s:%s:%s/mods/Tunics/Pink/romfs:%s/mods/Alpha/romfs:%s/mods/Beta/atmosphere/contents/%s/romfs:%s/mods/Bundle/Hud/romfs:%s/mods/Bundle/Music/romfs:%s/mods/Pack/Blue/romfs", explicit, explicit, base, base, base, tid, base, base, base);
+    CHECK(!strcmp(getenv("DM_ROMFS_OVERLAY"), want), "the DM_ROOT/mods scan appends all enabled mods, even an explicit overlay path");
     snprintf(want, sizeof want, "%s/mods/Alpha/cheats", base);
     const char *owner = "";
     CHECK(dm_mods_cheat_dir(0, &owner) && !strcmp(dm_mods_cheat_dir(0, NULL), want) && !dm_mods_cheat_dir(1, NULL) && !strcmp(owner, "Alpha"), "cheat folders, each with its mod's name");
-    CHECK(g_npfiles == 5, "five patch files found");
+    CHECK(g_npfiles == 6, "six patch files found");
 
     module_t *m = &mods[0];
     strcpy(m->name, "main"); strcpy(m->build_id, BUILD);
@@ -114,10 +120,15 @@ int main(void) {
     m->base = malloc(0x8000);
     for (uint64_t a = 0; a < 0x4000; a += 4) { uint32_t w = 0xAA0103E0; memcpy(m->base + a, &w, 4); }
     memset(m->base + 0x4000, 0x55, 0x4000);
-    strcpy(mods[1].name, "sdk"); strcpy(mods[1].build_id, "99999999999999999999999999999999");
+    module_t *sdk = &mods[1];
+    strcpy(sdk->name, "sdk"); strcpy(sdk->build_id, SDK_BUILD);
+    sdk->text_end = m->text_end; sdk->key_page_off = m->key_page_off; sdk->base = malloc(0x8000);
+    memcpy(sdk->base, m->base, 0x8000);
     snprintf(p, sizeof p, "%s/dm", base);
     dm_mods_patch_module(m, p);
+    dm_mods_patch_module(sdk, p);
     dm_mods_report_unmatched();
+    CHECK(word_at(m, 0x60) == 0xAA0103E0 && word_at(sdk, 0x60) == NOP, "a patch for sdk applies to sdk, not main");
 
     CHECK(word_at(m, 0x30) == 0xD65F03C0, "pchtxt: a patch after @enabled");
     CHECK(word_at(m, 0x20) == 0xAA0103E0, "pchtxt: a patch after @disabled is left out");
@@ -165,10 +176,12 @@ int main(void) {
     CHECK(green >= 0 && pink >= 0 && dm_mods_on(pink) && !dm_mods_on(green), "the pack's listed variants");
     dm_mods_set(green, 1);
     CHECK(dm_mods_on(green) && !dm_mods_on(pink) && !dm_mods_edited(), "turning a variant on turns its pack's other one off; a romfs-only mod needs no restart");
-    snprintf(want, sizeof want, "/explicit:%s/mods/Gamma/romfs:%s/mods/Tunics/Green/romfs:%s/mods/Alpha/romfs:%s/mods/Beta/atmosphere/contents/%s/romfs:%s/mods/Bundle/Hud/romfs:%s/mods/Bundle/Music/romfs:%s/mods/Pack/Blue/romfs", base, base, base, base, tid, base, base, base);
+    snprintf(want, sizeof want, "%s:%s:%s/mods/Tunics/Green/romfs:%s/mods/Alpha/romfs:%s/mods/Beta/atmosphere/contents/%s/romfs:%s/mods/Bundle/Hud/romfs:%s/mods/Bundle/Music/romfs:%s/mods/Pack/Blue/romfs", explicit, explicit, base, base, base, tid, base, base, base);
     CHECK(!strcmp(live_overlay, want), "the running game's overlay list follows the choice, in order");
     for (int i = 0; i < dm_mods_count(); i++) if (!strcmp(dm_mods_name(i), "Alpha")) dm_mods_set(i, 0);
     CHECK(dm_mods_edited() && !strstr(live_overlay, "Alpha"), "a mod with code patches or cheats: its romfs goes at once, the rest waits for a restart");
+    for (int i = 0; i < dm_mods_count(); i++) if (!strcmp(dm_mods_name(i), "Gamma")) dm_mods_set(i, 0);
+    CHECK(strstr(live_overlay, explicit) == live_overlay && !strstr(live_overlay + strlen(explicit), explicit), "turning a scanned mod off leaves its explicit overlay copy in first position");
     snprintf(p, sizeof p, "%s/mods/order.txt", base);
     size_t on; char *text = (char *)read_file(p, &on);
     CHECK(text && strstr(text, "\n# Tunics/Pink\nTunics/Green\n") && strstr(text, "\n# Pack/Red\n"), "order.txt is rewritten with the choice");
