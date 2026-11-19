@@ -8,6 +8,10 @@ void hle_bind_system_event(void *ev, int autoclear) { (void)ev; (void)autoclear;
 void dm_applet_enter(const char *name) { (void)name; unexpected++; }
 void dm_applet_leave(void) { unexpected++; }
 // hle_offline.c's socket overloads go to the host's sockets (hle_net.c): none may run here
+void dm_nifm_submit_wait(void) { unexpected++; }
+int dm_sk_unavailable(void) { unexpected++; return -1; }
+long dm_net_guest_errno(long r) { unexpected++; return r; }
+int dm_net_guest_errno_get(void) { unexpected++; return 0; }
 int dm_sk_socket(int f, int t, int p) { (void)f; (void)t; (void)p; unexpected++; return -1; }
 int dm_sk_bind(int fd, const void *a, unsigned n) { (void)fd; (void)a; (void)n; unexpected++; return -1; }
 int dm_sk_connect(int fd, const void *a, unsigned n) { (void)fd; (void)a; (void)n; unexpected++; return -1; }

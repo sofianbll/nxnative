@@ -24,8 +24,8 @@ $(B)/t_bcat_store: t_bcat_store.m ../hle_bcat_apple.m ../nextendo_bcat.h | $(B)
 	$(CLANG) $(BCAT_WARN) -fobjc-arc $(BCAT_CRYPTO_FLAGS) -o $@ t_bcat_store.m $(BCAT_CRYPTO_LIB) -lz -framework Foundation
 $(B)/t_bcat_sdk: t_bcat_sdk.c t_bcat_guest.S ../hle_bcat.c ../nextendo_bcat.h ../hle_bigstack.c $(GAME_H) | $(B)
 	$(CLANG) $(BCAT_WARN) $(GINC) -o $@ t_bcat_sdk.c t_bcat_guest.S ../hle_bigstack.c
-$(B)/t_bcat_fs: t_bcat_fs.c t_bcat_fs_provider.c t_fs_stub.c ../hle_fs.c ../nextendo_bcat.h ../hle_bigstack.c ../save_sync.c $(GAME_H) | $(B)
-	$(CLANG) $(BCAT_WARN) $(GINC) -o $@ t_bcat_fs.c t_bcat_fs_provider.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
+$(B)/t_bcat_fs: t_bcat_fs.c t_bcat_fs_provider.c t_fs_stub.c ../hle_fs.c ../hle_account_users.c ../account_users.h ../nextendo_bcat.h ../hle_bigstack.c ../save_sync.c $(GAME_H) | $(B)
+	$(CLANG) $(BCAT_WARN) $(GINC) -o $@ t_bcat_fs.c t_bcat_fs_provider.c t_fs_stub.c ../hle_account_users.c ../hle_bigstack.c ../save_sync.c
 $(B)/t_fs $(B)/t_fs_directory $(B)/t_fs_case $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan $(B)/t_save_sync $(B)/t_bcat_fs: bcat_absent.h
 bcat-fixtures: $(B)/t_bcat_store $(B)/t_bcat_sdk $(B)/t_bcat_fs
 	$(B)/t_bcat_store
@@ -126,8 +126,8 @@ sync-wait: $(B)/t_sync_wait
 .PHONY: sync-wait
 run: $(B)/t_symbols
 run: $(B)/t_server_environment
-$(B)/t_server_environment: t_server_environment.c ../hle_offline.c ../hle_net.h ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_server_environment.c
+$(B)/t_server_environment: t_server_environment.c t_nextendo_off.c ../hle_offline.c ../hle_net.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_server_environment.c t_nextendo_off.c $(NET_SOURCES)
 .PHONY: server-environment
 server-environment: $(B)/t_server_environment
 	$(B)/t_server_environment
@@ -368,8 +368,8 @@ $(B)/t_time: t_time.c ../hle_time.c ../hle_table.c ../hle.h ../dm.h $(GAME_H) | 
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_time.c ../hle_table.c
 $(B)/t_oe: t_oe.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_oe.c
-$(B)/t_friends: t_friends.c t_nextendo_off.c ../hle_friends.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_friends.c t_nextendo_off.c
+$(B)/t_friends: t_friends.c t_nextendo_off.c t_gate_fixture.h ../entry.S ../hle_bigstack.c ../hle_friends.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_friends.c t_nextendo_off.c ../entry.S ../hle_bigstack.c
 $(B)/t_condvar: t_condvar.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -DDM_TEST_HOOKS -I.. $(GINC) -o $@ t_condvar.c t_condvar_stub.c ../hle_thread.c
 $(B)/t_condvar_old: t_condvar.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
@@ -545,6 +545,7 @@ coverage:
 # Local transport fixtures use only synthetic packets and loopback peers.
 NET_SOURCES = ../hle_net_backend.c ../hle_nsd_backend.c t_net_write_stub.c
 NET_HEADERS = ../nsd.h ../net_socket.h ../net_discovery.h ../net_discovery_queue.inc ../discovery_protocol.h
+$(B)/t_server_environment: $(NET_SOURCES) $(NET_HEADERS)
 NET_FLAGS = -O1 -g -Wall -Wextra -Werror -Wno-unused-function
 $(B)/t_hle_wait: t_hle_wait.c t_hle_wait.S ../hle.h ../entry.S ../hle_bigstack.c $(GAME_H) | $(B)
 	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_hle_wait.c t_hle_wait.S ../entry.S ../hle_bigstack.c

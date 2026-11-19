@@ -38,6 +38,8 @@ __attribute__((weak)) uint32_t dm_nextendo_account_username(char output[33]) { (
 __attribute__((weak)) uint32_t dm_nextendo_async_ensure(void *o) { (void)o; return RES_FAIL; }
 __attribute__((weak)) void dm_guest_host_wait_begin(void) {}
 __attribute__((weak)) void dm_guest_host_wait_end(void) {}
+// Fixtures that call service functions directly should not reach a guest gate. t_friends links the real entry.S.
+__attribute__((weak)) void dm_hle_wait_enter(void) { abort(); }
 __attribute__((weak)) void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }
 __attribute__((weak)) void hle_signal_system_event(void *g) { (void)g; }
 __attribute__((weak)) int dm_account_uid_exists(const void *uid) { (void)uid; return 0; }

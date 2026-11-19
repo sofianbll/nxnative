@@ -1,7 +1,14 @@
 // friends service unit test: presence is accepted (Twelve Minutes stops its start-up on a failed UserPresence::Initialize, seedds/nxnative#217),
 // while the calls that would reach the service still fail. Expected results are hand-written, not taken from the implementation.
 #include "../hle_friends.c"
+#include "t_gate_fixture.h"
 #include <mach-o/getsect.h>
+void thr_svc_enter(uint64_t *regs, uint64_t pc) { assert(regs && pc); }
+void thr_svc_leave(void) {}
+int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
+uint64_t gate_dispatch(uint64_t ret, uint64_t *regs) { (void)ret; (void)regs; abort(); }
+uint64_t unimpl_c(unsigned index, uint64_t *regs) { (void)index; (void)regs; abort(); }
+void dm_thread_returned(void) { abort(); }
 void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }
 void hle_signal_system_event(void *g) { (void)g; }
 // the local user here (t_nextendo_off.c has the offline Nextendo provider); the presence and key checks below use another Uid
@@ -22,6 +29,7 @@ static void *hook(const char *name) {
     return count == 1 ? fn : NULL;
 }
 int main(void) {
+    fixture_gate_prepare();
     uint8_t presence[0x100] = {0}, uid[16] = {1};
     CHECK(h_fr_UpInit(presence, uid) == RES_OK, "UserPresence::Initialize succeeds");
     CHECK(h_fr_UpDesc(presence, "in game") == RES_OK, "UserPresence::SetDescription succeeds");
