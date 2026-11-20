@@ -68,6 +68,9 @@ def payoff(gap):   # the Gaps order: open gaps, then blocked, kept and unreviewe
 
 # The host's build-keyed rows: (table, the start of the row's label ('' = any), main build ('' = any), entry); the first that fits classifies a row
 HOST_BINDING = [
+    ('', '', 'b1f12fd919eae86ab8a978317677e64b', {'what': "Z-A's experimental Metal render scale", 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': 'host allocations preserve NVN coordinates; this build was checked at the first menu',
+     'blocked': 'exact shader mip sizes and Hi-Z behaviour are not validated above 1×'}),
     ('k_locks', 'RE Engine', '', {'what': "RE Engine's frame limit at a fixed pointer", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
      'why': 'engine code other RE Engine games ship', 'blocked': 'one RE Engine game here'}),
     ('k_locks', 'NLG', '', {'what': "Next Level Games' frame limiter target at a fixed address", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
