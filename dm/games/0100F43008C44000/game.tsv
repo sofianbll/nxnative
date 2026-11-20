@@ -26,6 +26,7 @@ shader_versions	v393216
 # every module main imports from
 modules	main sdk
 romfs_marker	arc/data.trpfs
+trpfd_merge	on
 zip_store	.bnk:.pck:.trpfd:.trpfs:.metallib
 
 # ---- Memory ----

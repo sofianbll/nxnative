@@ -324,6 +324,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the snapshot gathers every layer's names, then `names_first` sorts (name, position) once and keeps each name's first, in the order gathered, so the listing is the same as before (the last overlay folder first, then the base, an image base in its table order). Measured on an M4 Pro, a read-only folder of 4-byte files under an empty overlay folder: 10,000 entries 0.19 s → 0.03 s, 38,000 entries 3.23 s → 0.20 s; what is left grows linearly (each name's layer is looked up for its type and size). `t_fs_directory` checks a name in several layers, names differing in case and the layers' order.
 - **Found on:** a code audit's synthetic measurement (2026-11-13). No game runs with an overlay by default.
 
+### Trinity's index hides loose RomFS mod files
+
+- **Symptom:** when several Trinity mods are enabled, the game ignores loose files still listed in `arc/data.trpfd`; the first mod's descriptor used to win.
+- **Cause:** Trinity reads a listed resource from its packs in `arc/data.trpfs`, not from loose RomFS files.
+- **Fix:** for profiles with `trpfd_merge on`, the RomFS mount uses the base descriptor (folder or image) and removes the hash and routing pairs for loose files from the active `DM_ROMFS_OVERLAY` roots. Mods' descriptors are ignored when the merge succeeds; loose-file conflicts still use the first overlay. `DM_TRPFD_MERGE=0` restores the ordinary overlay order, as does an invalid base descriptor, a replacement `arc/data.trpfs`, or a symlink inside a mod root. Leave a manually assembled mod off when trying the separate mods, and restart the game after changing which mods are on. The mount never writes a mod or the base RomFS.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md). `make -C dm/host/tests GAME=0100F43008C44000 fs-trpfd` checks synthetic folder and image mounts, duplicate paths, and fallback. In-game testing remains open.
+
 ### System data stand-in for the MiiModel archive
 
 - **Symptom:** abort in `fs::detail::GetFileSystemProxyServiceObject` under `fs::QueryMountSystemDataCacheSize` (`main+0x8f23bc`).

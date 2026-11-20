@@ -55,6 +55,11 @@ _Static_assert(sizeof(DirectoryEntry) == 0x310, "DirectoryEntry layout");
 #define IMG_H(h) (((h) >> 58) == 1)
 #define IMG_M(h) ((int)(((h) >> 32) & 0x3ffffff))
 #define IMG_K(h) ((uint32_t)(h))
+// The image index has at most UINT32_MAX entries: reserve the next key for a mount's in-memory Trinity descriptor.
+#define TRPFD_K UINT32_MAX
+#define TRPFD_H(h) (IMG_H(h) && IMG_K(h) == TRPFD_K)
+#define TRPFD_PATH "arc/data.trpfd"
+#define TRPFS_PATH "arc/data.trpfs"
 // On Horizon a FileHandle is a pointer to the SDK's FileAccessor, a heap object, so its low bits are clear, and a game may use them: Metroid Prime 4's file device masks
 // them off (handle & ~7) before ReadFile, which read image entry 7 as entry 0 (another file, then a null pointer at boot). The guest sees the host's handle shifted
 // left by 4, 16-byte aligned as AArch64 heap blocks are (the image flag then lands on bit 62, as before): FH_OUT where a handle goes to the guest, FH_IN in each call that takes one
@@ -63,6 +68,7 @@ _Static_assert(sizeof(DirectoryEntry) == 0x310, "DirectoryEntry layout");
 typedef struct {
     char name[32]; char dir[1024]; char overlay[4096]; char commit[1024];
     romfs_img *img;                  // non-NULL: dir is a RomFS image file
+    uint8_t *trpfd; size_t trpfd_size; int trpfd_checked;   // immutable for the lifetime of the mount once published
     int ro;
     int aoc;                         // add-on content: Unmount releases the name (mount_aoc)
     int released;                    // an add-on content entry after its Unmount: kept for open handles and a later mount of its image, matched by no name (mnt_is)
@@ -236,6 +242,7 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
             strlcpy(g_mnt[g_nmnt].dir, work, sizeof g_mnt[0].dir); }
     } else strlcpy(g_mnt[g_nmnt].dir, dir, sizeof g_mnt[0].dir);
     g_mnt[g_nmnt].img = NULL;
+    g_mnt[g_nmnt].trpfd = NULL; g_mnt[g_nmnt].trpfd_checked = 0;
     struct stat ist;
     if (ro && !txn) {   // game files: a RomFS folder, or a RomFS image file in its place
         // A path that is neither is a stale or mistyped one (an old run command still naming the RomFS folder a rebuild replaced with RomFS.img): stop here, not at the game's
@@ -403,7 +410,15 @@ static int root_path(const char *root, const char *rest, char *out, size_t n) {
     }
     return 1;
 }
+static int trpfd_path(const char *rest) {
+    char normed[1024];
+    return strstr(rest, "data.trpfd") && norm_rest(rest, normed, sizeof normed) && normed[0] && !strcmp(normed + 1, TRPFD_PATH);
+}
 static int rom_overlay_path(const mount_t *m, const char *rest, char *out, size_t n) {
+    if (m->trpfd && trpfd_path(rest)) {
+        if (!m->img && root_path(m->dir, rest, out, n) && !access(out, F_OK)) return 1;
+        errno = ENOENT; return 0;
+    }
     char *roots = strdup(m->overlay);
     if (!roots) die("rom overlay path allocation failed");
     char *save = NULL;
@@ -440,6 +455,249 @@ static int norm_rest(const char *rest, char *out, size_t n) {
     }
     return 1;
 }
+
+typedef struct { size_t start, end; } trpfd_range;
+typedef struct { uint8_t *d; size_t size; trpfd_range hashes, infos; } trpfd_buffer;
+typedef struct { size_t at, vt; uint16_t bytes, vbytes; } trpfd_table;
+static uint16_t trpfd_u16(const uint8_t *p) { uint16_t v; memcpy(&v, p, sizeof v); return v; }
+static uint32_t trpfd_u32(const uint8_t *p) { uint32_t v; memcpy(&v, p, sizeof v); return v; }
+static uint64_t trpfd_u64(const uint8_t *p) { uint64_t v; memcpy(&v, p, sizeof v); return v; }
+static void trpfd_put32(uint8_t *p, uint32_t v) { memcpy(p, &v, sizeof v); }
+static int trpfd_overlaps(trpfd_range a, trpfd_range b) {
+    return a.start < b.end && b.start < a.end;
+}
+static int trpfd_span(const trpfd_buffer *b, size_t at, size_t len) {
+    if (at > b->size || len > b->size - at) return 0;
+    trpfd_range r = {at, at + len};
+    return !trpfd_overlaps(r, b->hashes) && !trpfd_overlaps(r, b->infos);
+}
+static size_t trpfd_ref(const trpfd_buffer *b, size_t at) {
+    uint32_t rel = trpfd_u32(b->d + at);   // the caller checked the offset word in its table or vector
+    return rel >= 4 && !(rel & 3) && rel <= b->size - at ? at + rel : 0;
+}
+static int trpfd_table_at(const trpfd_buffer *b, size_t at, trpfd_table *t) {
+    if (at < 4 || (at & 3) || !trpfd_span(b, at, 4)) return 0;
+    int32_t delta;
+    memcpy(&delta, b->d + at, sizeof delta);
+    int64_t vt = (int64_t)at - delta;   // a deduplicated FlatBuffer vtable may follow its table
+    if (vt < 4 || (vt & 1) || !trpfd_span(b, (size_t)vt, 4)) return 0;
+    const uint8_t *v = b->d + vt;
+    uint16_t vs = trpfd_u16(v), ts = trpfd_u16(v + 2);
+    // shortcut: cap vtables at 32 fields to bound repeated validation, raise for a supported schema that needs more.
+    if (vs < 4 || vs > 4 + 2 * 32 || (vs & 1) || ts < 4 || !trpfd_span(b, (size_t)vt, vs) || !trpfd_span(b, at, ts) ||
+        trpfd_overlaps((trpfd_range){(size_t)vt, (size_t)vt + vs}, (trpfd_range){at, at + ts})) return 0;
+    for (unsigned i = 4; i < vs; i += 2) {
+        uint16_t field = trpfd_u16(v + i);
+        if (field && (field < 4 || field >= ts)) return 0;
+    }
+    *t = (trpfd_table){at, (size_t)vt, ts, vs};
+    return 1;
+}
+// A missing slot (0) is distinct from a present malformed one (SIZE_MAX).
+static size_t trpfd_slot(const trpfd_buffer *b, const trpfd_table *t, unsigned i, unsigned width) {
+    unsigned v = 4 + 2 * i;
+    if (v >= t->vbytes) return 0;
+    unsigned off = trpfd_u16(b->d + t->vt + v);
+    if (!off) return 0;
+    size_t at = t->at + off;
+    return width <= t->bytes - off && !(at % width) ? at : SIZE_MAX;
+}
+static int trpfd_vector(const trpfd_buffer *b, size_t at, unsigned width, trpfd_range *r, uint32_t *count) {
+    if (!trpfd_span(b, at, 4) || (at + 4) % width) return 0;
+    *count = trpfd_u32(b->d + at);
+    if (*count > (b->size - at - 4) / width) return 0;
+    size_t bytes = 4 + (size_t)*count * width;
+    if (!trpfd_span(b, at, bytes)) return 0;
+    *r = (trpfd_range){at, at + bytes};
+    return 1;
+}
+static int trpfd_cmp(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return (x > y) - (x < y);
+}
+
+// The in-place compaction strategy is from MonZaMac (MIT, Copyright (c) 2026 Peiikai):
+// https://github.com/lucabravi/MonZaMac/blob/2306992528dc55dd36e000a76171f3667d14bcc9/runtime/services/fs.c#L353-L444
+static int trpfd_filter(uint8_t *d, size_t size, uint64_t *loose, size_t nloose, uint32_t *base, uint32_t *removed) {
+    trpfd_buffer b = {.d = d, .size = size};
+    trpfd_table root;
+    if (size < 4 || !trpfd_table_at(&b, trpfd_ref(&b, 0), &root)) return 0;
+    trpfd_range v[6] = {0};
+    uint32_t n[6] = {0};
+    for (unsigned i = 0; i < 6; i++) {
+        size_t slot = trpfd_slot(&b, &root, i, 4);
+        if (!slot && i >= 4) continue;
+        if (!slot || slot == SIZE_MAX) return 0;
+        size_t vec = trpfd_ref(&b, slot);
+        if (vec < root.at + root.bytes || !trpfd_vector(&b, vec, i == 0 || i == 4 ? 8 : 4, &v[i], &n[i])) return 0;
+    }
+    if (n[0] != n[2] || n[1] != n[3] || n[4] != n[5] || trpfd_overlaps(v[0], v[2])) return 0;
+    b.hashes = v[0]; b.infos = v[2];
+    if (!trpfd_span(&b, root.vt, root.vbytes)) return 0;
+    for (unsigned i = 1; i < 6; i++) {
+        if (i == 2 || !v[i].end) continue;
+        if (!trpfd_span(&b, v[i].start, v[i].end - v[i].start)) return 0;
+    }
+    for (unsigned i = 1; i < 6; i++) {
+        if (i == 4) continue;
+        for (uint32_t j = 0; j < n[i]; j++) {
+            size_t at = trpfd_ref(&b, v[i].start + 4 + 4 * (size_t)j);
+            if (at < v[i].end) return 0;
+            if (i == 1) {
+                if (!trpfd_span(&b, at, 4)) return 0;
+                uint32_t len = trpfd_u32(d + at);
+                if (len >= b.size - at - 4 || !trpfd_span(&b, at + 4, (size_t)len + 1) || d[at + 4 + len]) return 0;
+            } else {
+                trpfd_table t, sub;
+                if (!trpfd_table_at(&b, at, &t)) return 0;
+                size_t first = trpfd_slot(&b, &t, 0, 8), second = trpfd_slot(&b, &t, 1, i == 3 ? 8 : 4);
+                if (first == SIZE_MAX || second == SIZE_MAX) return 0;
+                size_t sub_at = i != 3 && second ? trpfd_ref(&b, second) : 0;
+                if (i != 3 && ((first ? trpfd_u64(d + first) : 0) >= n[1] ||
+                    (second && (sub_at < t.at + t.bytes || !trpfd_table_at(&b, sub_at, &sub) ||
+                                trpfd_slot(&b, &sub, 0, 4) == SIZE_MAX)))) return 0;
+            }
+        }
+    }
+    uint8_t *hashes = d + v[0].start + 4, *infos = d + v[2].start + 4;
+    for (uint32_t i = 1; i < n[0]; i++)
+        if (trpfd_u64(hashes + 8 * (size_t)(i - 1)) > trpfd_u64(hashes + 8 * (size_t)i)) return 0;
+    qsort(loose, nloose, sizeof *loose, trpfd_cmp);
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < n[0]; i++) {
+        uint64_t hash = trpfd_u64(hashes + 8 * (size_t)i);
+        if (bsearch(&hash, loose, nloose, sizeof *loose, trpfd_cmp)) continue;
+        if (i != kept) {
+            memcpy(hashes + 8 * (size_t)kept, &hash, sizeof hash);
+            // Keep the target table in place; uoffsets are relative to their own word.
+            trpfd_put32(infos + 4 * (size_t)kept, trpfd_u32(infos + 4 * (size_t)i) + 4 * (i - kept));
+        }
+        kept++;
+    }
+    trpfd_put32(d + v[0].start, kept);
+    trpfd_put32(d + v[2].start, kept);
+    *base = n[0]; *removed = n[0] - kept;
+    return 1;
+}
+
+typedef struct {
+    mount_t *m;
+    uint64_t *hashes; size_t count, cap;
+    char host[1024], rel[1024], visible[1024], guest[0x301];
+} trpfd_scan;
+
+// Walk only the configured mod roots, never follow a mod's child symlink outside its root.
+static const char *trpfd_walk(trpfd_scan *s, DIR *dir, size_t host_len, size_t rel_len) {
+    struct dirent *e;
+    while ((e = dir_next(dir))) {
+        int k = snprintf(s->host + host_len, sizeof s->host - host_len, "/%s", e->d_name);
+        if (k < 0 || (size_t)k >= sizeof s->host - host_len) continue;
+        s->host[host_len] = 0;
+        if (!guest_name(s->host, e->d_name, s->guest, sizeof s->guest)) return "cannot read overlay names";
+        s->host[host_len] = '/';
+        if (!s->guest[0] || strpbrk(s->guest, "/\\") || !strcmp(s->guest, ".") || !strcmp(s->guest, "..")) continue;
+        k = snprintf(s->rel + rel_len, sizeof s->rel - rel_len, "%s%s", rel_len ? "/" : "", s->guest);
+        if (k < 0 || (size_t)k >= sizeof s->rel - rel_len) continue;
+        if (!strcmp(s->rel, TRPFS_PATH)) return "overlay replaces " TRPFS_PATH;
+        if (!strcmp(s->rel, TRPFD_PATH)) continue;
+        struct stat st;
+        if (fstatat(dirfd(dir), e->d_name, &st, AT_SYMLINK_NOFOLLOW)) return "cannot stat overlay entry";
+        if (S_ISLNK(st.st_mode)) return "overlay contains a symlink";
+        if (S_ISDIR(st.st_mode)) {
+            int fd = openat(dirfd(dir), e->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (fd < 0) return "cannot open overlay directory";
+            DIR *sub = fdopendir(fd);
+            if (!sub) { close(fd); return "cannot open overlay directory"; }
+            const char *why = trpfd_walk(s, sub, strlen(s->host), rel_len + (size_t)k);
+            closedir(sub);
+            if (why) return why;
+        } else if (S_ISREG(st.st_mode)) {
+            if (!rom_overlay_path(s->m, s->rel, s->visible, sizeof s->visible)) return "cannot resolve overlay entry";
+            if (strcmp(s->visible, s->host)) continue;   // same first-wins lookup as OpenFile
+            if (s->count == s->cap) {
+                if (s->cap > SIZE_MAX / sizeof *s->hashes / 2) return "too many loose files";
+                size_t cap = s->cap ? 2 * s->cap : 64;
+                uint64_t *next = realloc(s->hashes, cap * sizeof *next);
+                if (!next) return "cannot allocate loose file hashes";
+                s->hashes = next; s->cap = cap;
+            }
+            uint64_t hash = 0xCBF29CE484222645ull;   // Game Freak's FNV-1a basis, not the standard one
+            for (const uint8_t *p = (const uint8_t *)s->rel; *p; p++) hash = (hash ^ *p) * 0x100000001B3ull;
+            s->hashes[s->count++] = hash;
+        }
+    }
+    return errno ? "cannot read overlay directory" : NULL;
+}
+
+static uint8_t *trpfd_base(const mount_t *m, size_t *size) {
+    int fd; uint64_t len, off = 0;
+    if (m->img) {
+        int64_t k = img_find(m->img, TRPFD_PATH);
+        if (k < 0 || !m->img->e[k].type || (m->img->e[k].flags & IMG_ENT_DAMAGED)) return NULL;
+        fd = m->img->fd; len = m->img->e[k].b; off = m->img->e[k].a;
+    } else {
+        char path[1024]; struct stat st;
+        if (!root_path(m->dir, TRPFD_PATH, path, sizeof path)) return NULL;
+        fd = open(path, O_RDONLY | O_NONBLOCK);
+        if (fd < 0) return NULL;
+        len = !fstat(fd, &st) && S_ISREG(st.st_mode) ? (uint64_t)st.st_size : 0;
+    }
+    // shortcut: cap one descriptor at 256 MiB, revisit if a supported title needs more.
+    uint8_t *d = len && len <= (256u << 20) ? malloc((size_t)len) : NULL;
+    if (d && !romfs_image_read(fd, d, (size_t)len, (off_t)off)) { free(d); d = NULL; }
+    if (!m->img) close(fd);
+    if (d) *size = (size_t)len;
+    return d;
+}
+
+static void trpfd_mount(const char *name) {
+    // Only the launcher-supplied mod roots contribute hashes, not other host-provided RomFS overlays.
+    const char *mods = getenv("DM_ROMFS_OVERLAY"), *enable = getenv("DM_TRPFD_MERGE");
+    if (!mods || !*mods || (enable && !strcmp(enable, "0"))) return;
+    PATH_LOCK();
+    mount_t *m = NULL;
+    for (int i = 0; i < g_nmnt; i++) if (mnt_named(&g_mnt[i], name)) { m = &g_mnt[i]; break; }
+    if (!m || m->trpfd_checked) return;
+    m->trpfd_checked = 1;
+    trpfd_scan s = {.m = m};
+    char roots[sizeof m->overlay], *save = NULL;
+    const char *why = NULL;
+    unsigned nr = 0;
+    if (strlcpy(roots, mods, sizeof roots) >= sizeof roots) why = "overlay list too long";
+    for (char *root = why ? NULL : strtok_r(roots, ":", &save); root && !why; root = strtok_r(NULL, ":", &save)) {
+        size_t len = strlcpy(s.host, root, sizeof s.host);
+        if (len >= sizeof s.host) { why = "overlay root too long"; break; }
+        DIR *dir = opendir(root);
+        if (!dir) { if (errno != ENOENT && errno != ENOTDIR) why = "cannot open overlay root"; continue; }
+        nr++;
+        why = trpfd_walk(&s, dir, len, 0);
+        closedir(dir);
+    }
+    if (!why && s.count) {
+        size_t size = 0; uint32_t base, removed;
+        uint8_t *d = trpfd_base(m, &size);
+        if (!d) why = "cannot read the base descriptor";
+        else if (!trpfd_filter(d, size, s.hashes, s.count, &base, &removed)) { free(d); why = "invalid base descriptor"; }
+        else {
+            m->trpfd = d; m->trpfd_size = size;
+            LOG("trpfd merge: base=%u removed=%u mods=%u", base, removed, nr);
+        }
+    }
+    if (why) LOG("trpfd merge: %s; using the original overlay order", why);
+    free(s.hashes);
+}
+
+static uint64_t trpfd_handle(const char *path) {
+    if (!DM_GAME_TRPFD_MERGE) return 0;
+    char fwd[1024]; path = fwd_slashes(path, fwd, sizeof fwd);
+    const char *c = path ? strchr(path, ':') : NULL;
+    if (!c || !trpfd_path(c + 1)) return 0;
+    PATH_LOCK();
+    for (int i = 0; i < g_nmnt; i++)
+        if (g_mnt[i].trpfd && mnt_is(&g_mnt[i], path, (size_t)(c - path))) return IMG_HANDLE(i, TRPFD_K);
+    return 0;
+}
+
 // create only allows the last component to not exist yet; intermediate directories still need an exact match.
 static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create) {
     char fwd[1024]; p = fwd_slashes(p, fwd, sizeof fwd); const char *c = strchr(p, ':');
@@ -568,6 +826,7 @@ HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv; rom → host RomFS directory", 
             rom_overlays(g_mnt[i].overlay, sizeof g_mnt[i].overlay); break;
         }
     }
+    if (DM_GAME_TRPFD_MERGE && r == RES_OK) trpfd_mount(name);
     return r;
 }
 // BCAT's SDK mount is read-only. Missing/unvalidated delivery data remains a
@@ -1119,6 +1378,11 @@ HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv; host mounts are permanent, a no-op,
 HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Result, h_fs_OpenFile, uint64_t *out, const char *path, int mode) { dm_thread_service_request();
     Result (*sdk_open)(uint64_t *, const char *, int) = sdk_path_call(path, "_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci");
     if (sdk_open) return sdk_opened(sdk_open(out, path, mode), out, "_ZN2nn2fs9CloseFileENS0_10FileHandleE");
+    uint64_t merged = trpfd_handle(path);
+    if (merged) {
+        if (mode & (MODE_WRITE | MODE_APPEND)) return RES_FAIL;
+        *out = FH_OUT(merged); return RES_OK;
+    }
     int mi; int64_t k;
     if (img_path(path, &mi, &k)) {
         if (k < 0) return err_res("open", path);
@@ -1152,14 +1416,24 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
     h = FH_IN(h);
     if (!h) { *out = 0; return RES_FAIL; }   // a file handle is an fd; 0 is stdin and never a file the game opened: the null handle the game keeps using after a failed open
     size_t got = 0; int reprep = 0, fd = (int)h; int64_t base = 0;
-    if (IMG_H(h)) {   // an image entry: read the image's descriptor at the entry's offset, never past its end
+    const uint8_t *trpfd = NULL;
+    if (TRPFD_H(h)) {
+        if (IMG_M(h) >= MAX_MOUNT || !g_mnt[IMG_M(h)].trpfd) { *out = 0; return RES_FAIL; }
+        const mount_t *m = &g_mnt[IMG_M(h)];
+        trpfd = m->trpfd;
+        sz = off < 0 || (uint64_t)off >= m->trpfd_size ? 0 : m->trpfd_size - off < sz ? m->trpfd_size - off : sz;
+    } else if (IMG_H(h)) {   // an image entry: read the image's descriptor at the entry's offset, never past its end
         const img_ent *x = &g_mnt[IMG_M(h)].img->e[IMG_K(h)];
         fd = g_mnt[IMG_M(h)].img->fd; base = (int64_t)x->a;
         sz = off < 0 || (uint64_t)off >= x->b ? 0 : (size_t)(x->b - off) < sz ? (size_t)(x->b - off) : sz;
     }
     dm_guest_write_prepare(buf, sz);   // The destination may be a texture pool page write-protected by the graphics layer: a kernel write to a read-only page returns EFAULT instead of page-faulting, so unprotect and mark dirty first
     while (got < sz) {
-        ssize_t r = pread(fd, (uint8_t *)buf + got, sz - got, base + off + got);
+        ssize_t r;
+        if (trpfd) {
+            if (vm_write(mach_task_self(), (vm_address_t)((uint8_t *)buf + got), (vm_offset_t)(trpfd + off + got), (mach_msg_type_number_t)(sz - got)) == KERN_SUCCESS) r = (ssize_t)(sz - got);
+            else { errno = EFAULT; r = -1; }
+        } else r = pread(fd, (uint8_t *)buf + got, sz - got, base + off + got);
         if (r < 0) { if (errno == EINTR) continue;
             // The graphics layer write-protects tracked pages again after each upload (nvn_dirty.c), so a page made writable above can be read-only again by the time pread
             // writes it: a plain write would fault into the tracker's handler, a system call gets EFAULT. Prepare the rest again (unprotect, mark dirty) and read on. Monster Train 2
@@ -1218,6 +1492,10 @@ HLE_FORCE("_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE", "fsp-srv → fstat(2)", 
     SDK_HANDLE(h, "_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE", Result (*)(int64_t *, uint64_t), RES_FAIL, out, h);
     h = FH_IN(h);
     if (!h) return RES_FAIL;
+    if (TRPFD_H(h)) {
+        if (IMG_M(h) >= MAX_MOUNT || !g_mnt[IMG_M(h)].trpfd) return RES_FAIL;
+        *out = (int64_t)g_mnt[IMG_M(h)].trpfd_size; return RES_OK;
+    }
     if (IMG_H(h)) { *out = (int64_t)g_mnt[IMG_M(h)].img->e[IMG_K(h)].b; return RES_OK; }
     struct stat st; if (fstat((int)h, &st)) return err_res("fstat", "fd");
     *out = st.st_size; return RES_OK;
