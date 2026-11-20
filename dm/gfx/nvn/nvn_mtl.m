@@ -3275,7 +3275,7 @@ static void rs_init(void) {
     if (!dm_fps_state || strcmp(dm_main_build(), "b1f12fd919eae86ab8a978317677e64b")) return;
     float value;
     memcpy(&value, dm_fps_state + 0x10, sizeof value);  // validated by the loader against this main's fixups
-    // The rewriter does not advertise scaled rendering until Hi-Z is checked in gameplay.
+    // Only the prototype's two supersampling levels are offered; Hi-Z still needs gameplay validation.
     if (value != 1.5f && value != 2.0f) return;
     g_rs = value;
     MLOG("Z-A: Metal render targets at %.2fx (DM_RENDER_SCALE)", g_rs);

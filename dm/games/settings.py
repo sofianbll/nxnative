@@ -133,8 +133,12 @@ def build(gid, patched, control, other_programs=()):
             if values == 'languages' and not have: s['note'] = UNKNOWN_LANGUAGES
         elif kind == 'range':
             lo, hi, st = (float(x) for x in values.split(':'))
-            if var == 'DM_RENDER_SCALE' and keys.get('RENDER_SCALE', '1') != '1':   # a stub that also raises the size: up to its largest scale (the rewriter's RENDER_SCALE, hex as every header value)
-                hi = float(int(keys['RENDER_SCALE'], 16))
+            if var == 'DM_RENDER_SCALE':
+                hi = float(int(keys['RENDER_SCALE'], 16))   # the rewriter's largest scale, hex as every header value
+                if mac := g.get('render_scale_mac', ''):
+                    if platform != 'mac': continue
+                    minimum, step, s['note'] = mac.split('\t')
+                    lo, st = float(minimum), float(step)
             s.update(min=lo, max=hi, step=st)
         elif kind == 'toggle':
             if s['default'] not in ('0', '1'): sys.exit(f'settings.tsv:{n}: a toggle defaults to 0 or 1: {s["default"]}')

@@ -47,6 +47,7 @@ def frame_step(ctx):
     ctx.emit(B(ctx.here(), 0x1b296dc))
     ctx.put(0x1b296d8, [B(0x1b296d8, start)],
             'native clock interval from the host frame step; target 0 preserves the original selector')
+    ctx.render_scale = 2   # the Mac Metal prototype reads state +0x10, not the guest code
 
 
 FRAME_STEP = {'b1f12fd919eae86ab8a978317677e64b': frame_step}

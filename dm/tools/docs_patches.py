@@ -70,7 +70,7 @@ def payoff(gap):   # the Gaps order: open gaps, then blocked, kept and unreviewe
 HOST_BINDING = [
     ('', '', 'b1f12fd919eae86ab8a978317677e64b', {'what': "Z-A's experimental Metal render scale", 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
      'why': 'host allocations preserve NVN coordinates; this build was checked at the first menu',
-     'blocked': 'Hi-Z behaviour is not validated in gameplay above 1×'}),
+     'kept': 'experimental, exposed on Mac; Hi-Z behaviour is not validated in gameplay above 1×'}),
     ('k_locks', 'RE Engine', '', {'what': "RE Engine's frame limit at a fixed pointer", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
      'why': 'engine code other RE Engine games ship', 'blocked': 'one RE Engine game here'}),
     ('k_locks', 'NLG', '', {'what': "Next Level Games' frame limiter target at a fixed address", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
@@ -308,7 +308,7 @@ def page():
                 if fold: lines += [f'  <details><summary>{len(sites)} frame-step sites</summary>', '']
                 for off, why in sites: lines.append(f'  - frame step `+{off:#x}`: {why}')
                 if fold: lines += ['', '  </details>', '']
-                if scale: lines.append('  - render scale stub (the launcher offers DM_RENDER_SCALE)')
+                if scale: lines.append(f'  - render scale up to {scale}× (the launcher offers DM_RENDER_SCALE)')
             if bid in st:
                 st_sites = frame_step_sites(st[bid])[0]; n_fs += len(st_sites)
                 for off, why in st_sites: lines.append(f'  - stub `+{off:#x}`: {why}')

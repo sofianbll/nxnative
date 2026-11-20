@@ -64,6 +64,20 @@ class LauncherSettingsTests(unittest.TestCase):
                 self.assertEqual((s['kind'], s['section'], s['default'], s['on'], s['off']), ('toggle', 'Game', '0', '1', '0'))
                 self.assertNotIn(var, build(WONDER, 'nvn', platform))
 
+    def test_za_render_scale_offers_only_the_mac_prototype_scales(self):
+        gid, var = '0100F43008C44000', 'DM_RENDER_SCALE'
+        self.assertNotIn(var, build(gid, 'nvn', 'mac'))   # no fixup on an unregistered build
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'GFXAPI': 'nvn', 'SETTINGS_PLATFORM': 'mac'}):
+            (Path(tmp) / 'main.fixups.tsv').write_text('# RENDER_SCALE\t2\n')
+            listed = settings.build(gid, tmp, Path(tmp) / 'control.nacp')
+            row = next(s for s in listed['settings'] if s['env'] == var)
+            self.assertEqual((row['kind'], row['default'], row['min'], row['max'], row['step']), ('range', '1.0', 1.0, 2.0, 0.5))
+            self.assertIn('Experimental on Z-A', row['note'])
+            schema = json.loads((ROOT / 'docs/launcher.schema.json').read_text(encoding='utf-8'))
+            self.assertEqual(conforms(listed, schema, schema), [])
+            with patch.dict(os.environ, {'SETTINGS_PLATFORM': 'ios'}):
+                self.assertFalse(any(s['env'] == var for s in settings.build(gid, tmp, Path(tmp) / 'control.nacp')['settings']))
+
     def test_sections_keep_the_profile_defaults(self):
         botw, wonder = build(BOTW, 'nvn'), build(WONDER, 'nvn')
         self.assertEqual([e for e, s in botw.items() if s['section'] == 'Performance'], PERFORMANCE_NVN)

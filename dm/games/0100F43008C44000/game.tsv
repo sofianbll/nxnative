@@ -14,6 +14,7 @@ app_category	public.app-category.games
 pad_layout	simple
 # 2.0.2's native clock interval follows the host's adaptive frame step.
 fps_target	60
+render_scale_mac	1.0	0.5	Experimental on Z-A: 150 % and 200 % render the 3D picture larger for sharper, smoother edges, at the cost of more GPU time. Report missing objects.
 # the game sets the near=0 depth mode (nvnDeviceSetDepthMode): the pipeline bases made before it runs take the main0_z vertex entries
 depth_mode	zero
 
