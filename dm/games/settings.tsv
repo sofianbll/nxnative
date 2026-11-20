@@ -26,7 +26,9 @@ DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=bas
 DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		level=basic
 DM_PICTURE_FIT	choice	fit=Fit,fill=Fill	fit	platform:ios	Game	Picture	Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game.
 DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
-DM_NETWORK	choice	offline=Offline,ldn=Local communication,lan=LAN mode,nextendo=Online (Nextendo)?build:DM_NEXTENDO	build:DM_NETWORK|offline	always	Game	Network	Choose how this game connects.
+DM_NETWORK	choice	offline=Offline,ldn=Local communication,lan=LAN mode,nextendo=Online (Nextendo)?build:DM_NEXTENDO,auto=Automatic	build:DM_NETWORK|offline	always	Game	Network	Choose how this game connects.
+# iOS uses its dedicated VPN play section to pair the switch with the host address.
+DM_NET_VPN	toggle	-	0	platform:mac	Game	Play over a VPN	For LAN mode and Local communication through ZeroTier, Tailscale or NetBird.
 DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback
 DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic
 DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Controls	Rumble strength		needs=DM_RUMBLE=1

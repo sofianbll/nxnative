@@ -105,6 +105,12 @@ How the game reaches other players. **Offline** is the default and keeps the gam
 
 The packed app already carries Nextendo's public certificates. The game takes your name, country and, when the account has one, your birthday from your Nextendo account. On iPhone, **Birthday, if Nextendo has none** under **Online** is used only when the account gives none.
 
+**Automatic** turns on Local communication, LAN mode and, in an app built with `--nextendo`, Online (Nextendo) all at once. The game uses whichever its own menu asks for. Online play still needs sign-in, and VPN play works in this mode too.
+
+**Play over a VPN** works with Local communication, LAN mode and Automatic. Connect every player to the same ZeroTier, Tailscale or NetBird network. On ZeroTier, everyone turns on **Play over a VPN** and leaves the host address empty. On Tailscale or NetBird, the host does the same; players joining on iPhone instead enter the host's VPN IPv4 address in **Host address (VPN)**, which turns on VPN play by itself. Play stays greyed out until the field is empty or contains a valid IPv4 address. On Mac, joiners turn on **Play over a VPN** and set `DM_NET_DISCOVERY_PEER=<host's VPN IPv4 address>` in their `env.txt`.
+
+`DM_NET_VPN=1` in `env.txt` turns on VPN play on either platform. Set `DM_NET_DISCOVERY_PEER` as well for Tailscale or NetBird joiners; everyone else leaves it unset. On iPhone, these variables in `Documents/env.txt` lock the VPN controls. If the VPN adapter cannot be selected, the game gets no network rather than falling back to Wi-Fi, and the log says why.
+
 **Player name** appears below the settings while Network is anything but Offline. It is the name other players see, up to 10 characters. Leave it empty to use your Nextendo username, or Player when you are not signed in. `DM_NICK` in `Documents/env.txt` does the same, and the field then shows it without letting you change it.
 
 ## Controls

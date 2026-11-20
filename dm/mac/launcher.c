@@ -243,7 +243,8 @@ static int nextendo_inventory_is_sealed(CFDictionaryRef files) {
 
 static int nextendo_at_launch(const char *dm, const char *sup, char private_dir[PATH_MAX]) {
     const char *network = getenv("DM_NETWORK");
-    if (!network || strcmp(network, "nextendo")) {
+    CFTypeRef files = CFBundleGetValueForInfoDictionaryKey(CFBundleGetMainBundle(), CFSTR("DMNextendoFiles"));
+    if (!network || (strcmp(network, "nextendo") && (strcmp(network, "auto") || !files))) {
         unsetenv("DM_NEXTENDO_ROUTES"); unsetenv("DM_NEXTENDO_CLIENT_ID");
         return 1;
     }
@@ -252,7 +253,6 @@ static int nextendo_at_launch(const char *dm, const char *sup, char private_dir[
         if (setenv("DM_NEXTENDO_CLIENT_ID", client, 0)) return 0;
     const char *override = getenv("DM_NEXTENDO_ROUTES");
     if (override && *override) return 1;   // the host still checks an explicit route override
-    CFTypeRef files = CFBundleGetValueForInfoDictionaryKey(CFBundleGetMainBundle(), CFSTR("DMNextendoFiles"));
     if (!files || CFGetTypeID(files) != CFDictionaryGetTypeID()) return 0;
     char bundled[PATH_MAX], routes[PATH_MAX];
     if ((size_t)snprintf(bundled, sizeof bundled, "%s/nextendo-services", dm) >= sizeof bundled) return 0;

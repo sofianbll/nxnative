@@ -85,7 +85,7 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
         self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PICTURE_FIT'})
         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
-        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2'})   # the Mac window's Display mode (front_mac.m reads 1 or 0); Switch 2 controllers (pad_switch2_apple.m, wired on the Mac only)
+        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2', 'DM_NET_VPN'})   # iOS has its own VPN section
         s = mac['DM_FULLSCREEN']
         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
 
@@ -103,6 +103,7 @@ class LauncherSettingsTests(unittest.TestCase):
             'offline': 'No network. Code mods work.',
             'ldn': 'Like nearby play on Switch: play with Macs or iPhones on the same Wi-Fi.',
             'lan': "The game's LAN mode, if it has one: devices on the same network.",
+            'auto': 'Turns on Local communication, LAN mode and, in a Nextendo build, Online together.',
         }
         for platform in ('ios', 'mac'):
             for enabled in ('0', '1'):
@@ -112,10 +113,16 @@ class LauncherSettingsTests(unittest.TestCase):
                 with self.subTest(platform=platform, nextendo=enabled), \
                         patch.dict(os.environ, {'DM_NEXTENDO': enabled, 'DM_NETWORK': 'nextendo' if online else 'offline'}):
                     network = build(WONDER, 'nvn', platform)['DM_NETWORK']
-                    self.assertEqual(network['options'], options + extra)
+                    self.assertEqual(network['options'], options + extra + [['auto', 'Automatic']])
                     self.assertEqual(network['option_notes'], notes | extra_notes)
                     self.assertEqual(network['note'], 'Choose how this game connects.')
                     self.assertEqual(network['default'], 'nextendo' if online and platform == 'ios' else 'offline')
+
+    def test_vpn_toggle_is_listed_on_mac_and_not_duplicated_on_ios(self):
+        vpn = build(WONDER, 'nvn', 'mac')['DM_NET_VPN']
+        self.assertEqual((vpn['kind'], vpn['label'], vpn['default'], vpn['on'], vpn['off']),
+                         ('toggle', 'Play over a VPN', '0', '1', '0'))
+        self.assertNotIn('DM_NET_VPN', build(WONDER, 'nvn', 'ios'))
 
     def test_unknown_platform_is_rejected(self):
         with self.assertRaisesRegex(SystemExit, 'SETTINGS_PLATFORM must be ios or mac'):

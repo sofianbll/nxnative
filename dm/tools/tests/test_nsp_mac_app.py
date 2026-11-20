@@ -874,12 +874,13 @@ class App(unittest.TestCase):
 
         r = run()
         self.assertNotIn('DM_NEXTENDO_ROUTES', r); self.assertNotIn('DM_NEXTENDO_CLIENT_ID', r)
-        for mode in ('offline', 'ldn'):
+        for mode in ('offline', 'ldn', 'lan'):
             r = run(DM_NETWORK=mode, DM_NEXTENDO_ROUTES='/unused', DM_NEXTENDO_CLIENT_ID='unused')
             self.assertEqual(r['DM_NETWORK'], mode)
             self.assertNotIn('DM_NEXTENDO_ROUTES', r); self.assertNotIn('DM_NEXTENDO_CLIENT_ID', r)
-        r = run(DM_NETWORK='nextendo')
-        self.assertEqual((r['DM_NETWORK'], r['DM_NEXTENDO_ROUTES'], r['DM_NEXTENDO_CLIENT_ID']), ('nextendo', str(routes), 'example.public'))
+        for mode in ('nextendo', 'auto'):
+            r = run(DM_NETWORK=mode)
+            self.assertEqual((r['DM_NETWORK'], r['DM_NEXTENDO_ROUTES'], r['DM_NEXTENDO_CLIENT_ID']), (mode, str(routes), 'example.public'))
         r = run(DM_NETWORK='nextendo', DM_NEXTENDO_ROUTES=str(profile / 'routes.tsv'), DM_NEXTENDO_CLIENT_ID='override.public')
         self.assertEqual((r['DM_NEXTENDO_ROUTES'], r['DM_NEXTENDO_CLIENT_ID']), (str(profile / 'routes.tsv'), 'override.public'))
         routes.chmod(0o664)   # rejected by the host in place, but the contents remain as packed
@@ -893,6 +894,15 @@ class App(unittest.TestCase):
         self.assertEqual(p.returncode, 1)
         self.assertIn('Cannot use the Nextendo service profile', (t / 'home/alert.txt').read_text())
         self.assertFalse(list(private.parent.parent.glob('.nextendo-services.*')))
+
+    def test_automatic_is_local_only_in_a_plain_mac_app(self):
+        p = self.launch(DM_NETWORK='auto', DM_NET_VPN='1', DM_NET_DISCOVERY_PEER='100.101.2.3',
+                        DM_NEXTENDO_ROUTES='/unused', DM_NEXTENDO_CLIENT_ID='unused')
+        out = p.communicate(timeout=30)[0].decode()
+        self.assertEqual(p.returncode, 7, out)
+        r = self.host_run()
+        self.assertEqual((r['DM_NETWORK'], r['DM_NET_VPN'], r['DM_NET_DISCOVERY_PEER']), ('auto', '1', '100.101.2.3'))
+        self.assertNotIn('DM_NEXTENDO_ROUTES', r); self.assertNotIn('DM_NEXTENDO_CLIENT_ID', r)
 
     def test_saved_choices(self):
         """launcher.<VAR> in the app's preferences domain, as a front end or a settings window saves it: used from Finder or the Dock, checked against this build's settings,

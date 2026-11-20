@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <string.h>
 #include "net_discovery.h"
 
 typedef struct { int32_t fd; int16_t events, revents; } dm_net_pollfd;
@@ -28,6 +29,19 @@ static inline int dm_net_trace_enabled(void) {
     const char *flag = getenv("DM_NET_TRACE");
     return flag && flag[0] == '1' && !flag[1];
 }
+// VPN play, DM_NET_VPN=1 in the lan, ldn and auto modes: the adapter is the VPN's (net_vpn.h; hle_net_backend.c net_vpn_interface), never Wi-Fi, and discovery
+// never relies on native broadcast, which a tunnel does not carry
+static inline int dm_net_vpn(void) {
+    const char *v = getenv("DM_NET_VPN"); dm_net_mode_t mode = dm_net_mode();
+    return v && !strcmp(v, "1") && (mode == DM_NET_LAN || mode == DM_NET_LDN || mode == DM_NET_AUTO);
+}
+// The LDN room this device is in, as hle_ldn.c publishes it: room 0 when there is none, else the other members' addresses (network order, at most
+// DM_NET_SESSION_MAX, none while the device is alone in it). In a room a game's broadcast goes to each member instead of a native broadcast or a subnet
+// sweep, and alone it reaches nobody, as on an empty network; unless native broadcast is available off a VPN.
+enum { DM_NET_SESSION_MAX = 7 };
+void dm_net_set_session(int room, const uint32_t *members, unsigned count);
+// Logs every IPv4 adapter's name, address, prefix, flags and functional type (LDN logs them as it starts)
+void dm_net_log_adapters(void);
 // Startup-only DNS policy: -1 refuses, 0 keeps the name, 1 supplies IPv4.
 // Only explicit Nextendo/auto modes consult the provider.
 typedef int (*dm_net_dns_provider)(const char *host, char *output, size_t capacity);

@@ -62,6 +62,7 @@ NETWORK_OPTION_NOTES = {
     'ldn': 'Like nearby play on Switch: play with Macs or iPhones on the same Wi-Fi.',
     'lan': "The game's LAN mode, if it has one: devices on the same network.",
     'nextendo': 'Internet through Nextendo, account required. Code mods are turned off.',
+    'auto': 'Turns on Local communication, LAN mode and, in a Nextendo build, Online together.',
 }
 
 
