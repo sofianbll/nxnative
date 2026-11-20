@@ -102,6 +102,20 @@ int main(void) {
         }
         CHECK(game->clicks == 0, "a click on the prompt does not reach the game's view");
 
+        NSArray *menu_labels = @[@"Reprendre", @"Retour au mode console", @"Quitter"];
+        __block NSInteger chosen = -1;
+        NSView *menu = hq_menu_view(NSMakeRect(0, 0, 640, 360), @"Jeu", menu_labels, 1, ^(NSInteger row) { chosen = row; });
+        [menu layoutSubtreeIfNeeded];
+        NSArray<NSView *> *entries = ((NSStackView *)card_of(menu)).arrangedSubviews;
+        CHECK(entries.count == 4 && NSContainsRect(menu.bounds, card_of(menu).frame), "three menu actions and title fit in a small window");
+        for (NSUInteger i = 1; i < entries.count; i++) {
+            NSButton *b = (NSButton *)entries[i];
+            CHECK([b isKindOfClass:NSButton.class] && [b.attributedTitle.string isEqualToString:menu_labels[i - 1]], "each localized row is an actionable button");
+            CHECK(b.accessibilitySelected == (i == 2), "only the chosen row is marked selected");
+        }
+        [(NSButton *)entries[2] performClick:nil];
+        CHECK(chosen == 1, "clicking Back to console chooses that row");
+
         CAShapeLayer *ring = nil;
         NSView *h = hq_hold_view(small, @"Keep holding to quit", &ring);
         [h layoutSubtreeIfNeeded];
@@ -115,6 +129,7 @@ int main(void) {
 
         const char *dir = getenv("DM_HOME_QUIT_CAPTURE");
         if (dir && *dir) {
+            capture(hq_menu_view(tv, @"Super Mario Odyssey", menu_labels, 1, ^(NSInteger row) { (void)row; }), tv.size, dir, "home-menu.png");
             capture(hq_prompt_view(tv, @"Quit Super Mario Odyssey?", @"Unsaved progress will be lost.", @"Quit", @"Cancel", @"a.circle", @"b.circle"), tv.size, dir, "home-quit-prompt.png");
             // The controller applet's prompt on the same card (front_mac.m, ctrl_prompt.h): Done drawn plain below the minimum, cream once it is met
             capture(hq_card_view(tv, @"2 players wanted", @"Press a button on each controller to join.\nPlayers: 1 of 2", @"Done", @"Cancel", @"a.circle", @"b.circle", 0), tv.size, dir, "ctrl-prompt-waiting.png");

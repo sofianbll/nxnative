@@ -61,7 +61,7 @@ static void test_value_cb(IOHIDDeviceRef device, IOHIDValueCallback callback, vo
 static IOHIDElementRef test_val_element(IOHIDValueRef v) { return (__bridge IOHIDElementRef)((__bridge TestValue *)v).element; }
 static CFIndex test_val_int(IOHIDValueRef v) { return ((__bridge TestValue *)v).value; }
 static CFIndex test_el_min(IOHIDElementRef e) { (void)e; return 0; }
-static CFIndex test_el_max(IOHIDElementRef e) { (void)e; return 1; }
+static CFIndex test_el_max(IOHIDElementRef e) { TestElem *t = (__bridge TestElem *)e; return t.page == 1 && t.usage == 0x39 ? 7 : 1; }
 static CFArrayRef test_elements(IOHIDDeviceRef device, CFDictionaryRef match, IOOptionBits o) { (void)match; (void)o; return CFBridgingRetain(((__bridge TestDev *)device).elements ?: @[]); }
 static uint32_t test_el_page(IOHIDElementRef e) { return ((__bridge TestElem *)e).page; }
 static uint32_t test_el_usage(IOHIDElementRef e) { return ((__bridge TestElem *)e).usage; }
@@ -133,14 +133,22 @@ static void hidpad_attach(hid_pad *d) { (void)d; attached++; }
 static void hidpad_detach(hid_pad *d) { (void)d; attached--; }
 static int reads;
 static uint64_t buttons;
-static void hidpad_read(hid_pad *d) { reads++; buttons = pad_hid_buttons(&d->st); }
 static home_quit quit_state;
 static double quit_now;
 static int quit_polls;
-static void hidpad_quit_changed(void) {
-    uint32_t q = 0; for (hid_pad *d = g_hidpads; d; d = d->next) q |= hidpad_quit_buttons(d);
+static void hidpad_quit_changed(int interrupted) {
+    if (interrupted && quit_state.menu && quit_state.phase == HQ_HOLDING) hq_cancel(&quit_state);
+    uint32_t q = 0; int up = 0, down = 0;
+    for (hid_pad *d = g_hidpads; d; d = d->next) {
+        q |= hidpad_quit_buttons(d);
+        if (quit_state.menu) hidpad_menu_dirs(d, &up, &down, DM_STICK_MAX * HQ_STICK);
+    }
     quit_polls++;
-    hq_step(&quit_state, quit_now, !!(q & HIDPAD_QUIT_HOME), !!(q & HIDPAD_QUIT_A), !!(q & HIDPAD_QUIT_B));
+    hq_step_nav(&quit_state, quit_now, !!(q & HIDPAD_QUIT_HOME), !!(q & HIDPAD_QUIT_A), !!(q & HIDPAD_QUIT_B), up, down);
+}
+static void hidpad_read(hid_pad *d) {
+    if (quit_state.menu && (quit_state.phase == HQ_MENU || quit_state.phase == HQ_SETTLE)) hidpad_quit_changed(0);
+    reads++; buttons = pad_hid_buttons(&d->st);
 }
 static int motion_samples;
 static float motion_acc[3], motion_rot[3];
@@ -379,14 +387,27 @@ int main(void) { @autoreleasepool {
     uint64_t mapped = pad_hid_buttons(&n->st); assert(mapped == (DM_BTN_B | DM_BTN_X | DM_BTN_Y));
     r[4] = 0x30; push_report(nano, r, 49); assert(n->pro_m == mapped);
     assert(hidpad_quit_buttons(n) == (HIDPAD_QUIT_HOME | HIDPAD_QUIT_A) && quit_state.phase == HQ_HOLDING);
-    quit_now += HQ_HOLD_S; hidpad_quit_changed(); assert(quit_state.phase == HQ_PROMPT);
+    quit_now += HQ_HOLD_S; hidpad_quit_changed(0); assert(quit_state.phase == HQ_PROMPT);
     r[3] = 0x04; r[4] = 0; push_report(nano, r, 49);
     assert(n->pro_m == DM_BTN_A && hidpad_quit_buttons(n) == HIDPAD_QUIT_B && quit_state.phase == HQ_SETTLE);
     r[3] = 0; push_report(nano, r, 49); assert(quit_state.phase == HQ_IDLE);
     r[4] = 0x10; push_report(nano, r, 49);
-    quit_now += HQ_HOLD_S; hidpad_quit_changed(); assert(quit_state.phase == HQ_PROMPT);
+    quit_now += HQ_HOLD_S; hidpad_quit_changed(0); assert(quit_state.phase == HQ_PROMPT);
     r[3] = 0x08; r[4] = 0; push_report(nano, r, 49); assert(quit_state.phase == HQ_QUIT);
-    quit_state = (home_quit){0};
+    quit_state = (home_quit){.menu = 1};
+    r[3] = 0; r[4] = 0x10; push_report(nano, r, 49);
+    quit_now += 0.2; r[4] = 0; push_report(nano, r, 49);
+    assert(quit_state.phase == HQ_MENU && quit_state.sel == HQ_ROW_RESUME);
+    r[5] = 0x01; push_report(nano, r, 49); assert(quit_state.sel == HQ_ROW_CONSOLE);   // physical d-pad down
+    r[3] = 0x04; push_report(nano, r, 49);   // bottom B mapped to guest A: still cancels
+    assert(n->pro_m & DM_BTN_A); assert(quit_state.phase == HQ_SETTLE);
+    r[3] = r[5] = 0; push_report(nano, r, 49); assert(quit_state.phase == HQ_IDLE);
+    r[4] = 0x10; push_report(nano, r, 49);
+    quit_now += 0.2; r[4] = 0; push_report(nano, r, 49); assert(quit_state.phase == HQ_MENU);
+    put_stick(r + 6, 2048, 1200); push_report(nano, r, 49); assert(quit_state.sel == HQ_ROW_CONSOLE);
+    put_stick(r + 6, 2048, 2048); r[3] = 0x08; push_report(nano, r, 49);   // right A mapped to guest B: still confirms
+    assert(n->pro_m == DM_BTN_B && quit_state.phase == HQ_PAUSED);
+    quit_state = (home_quit){.menu = 1};
     r[3] = 0; r[4] = 0x10; push_report(nano, r, 49); assert(quit_state.phase == HQ_HOLDING);
     pad_hid_init(&n->st, NULL, PAD_HID_NINTENDO);
     player = 0; hidpad_lights(n, 0); assert(nouts == 10 && outs[9][1] == JC1_SUB_LEDS && outs[9][2] == 0x01);   // player 1 once it joins
@@ -394,8 +415,8 @@ int main(void) { @autoreleasepool {
     player = -1;
     memset(r, 0, sizeof r); r[0] = PAD_HID_NIN_REPORT;
     push_report(nano, r, 12); assert(!n->full && nouts == 11 && outs[10][1] == JC1_SUB_DEVICE_INFO);                 // back in report 0x3F: read from it, asked again
-    assert(!hidpad_quit_buttons(n) && quit_state.phase == HQ_IDLE);   // falling back clears the last full-mode Home press
-    puts("Nintendo 0x30: Home hold and positional confirm/cancel with guest remapping: OK");
+    assert(!hidpad_quit_buttons(n) && quit_state.phase == HQ_IDLE);   // falling back clears the last Home press without a synthetic tap
+    puts("Nintendo 0x30: Home hold/tap, d-pad/stick navigation and positional A/B with guest remapping: OK");
     wait_ms(300); assert(nouts == 12 && outs[11][1] == JC1_SUB_DEVICE_INFO && n->tries == 2);                    // that ask unanswered: asked again
     memset(r, 0, sizeof r); r[0] = 0x21; r[13] = 0x82; r[14] = JC1_SUB_DEVICE_INFO;
     push_report(nano, r, 49); wait_ms(100); assert(nouts == 12 + 7 && !n->steps && n->answered == n->asks);          // answered: the handshake again, lights included
@@ -417,13 +438,19 @@ int main(void) { @autoreleasepool {
     pad_hid_init(&n->st, "A=1,B=2", PAD_HID_NINTENDO);
     TestElem *home = elem(0, 0x3F, 9, 13), *a = elem(0, 0x3F, 9, 2), *b = elem(0, 0x3F, 9, 1);
     push_value(simple, home, 1); assert(quit_state.phase == HQ_HOLDING);
-    quit_now += HQ_HOLD_S; hidpad_quit_changed(); assert(quit_state.phase == HQ_PROMPT);
+    quit_now += 0.2; push_value(simple, home, 0); assert(quit_state.phase == HQ_MENU);
+    TestElem *hat = elem(0, 0x3F, 1, 0x39);
+    push_value(simple, hat, 4); assert(quit_state.sel == HQ_ROW_CONSOLE);
+    push_value(simple, b, 1); assert(quit_state.phase == HQ_SETTLE && buttons == (DM_BTN_DOWN | DM_BTN_A));
+    push_value(simple, b, 0); push_value(simple, hat, 8); assert(quit_state.phase == HQ_IDLE);
+    push_value(simple, home, 1);
+    quit_now += HQ_HOLD_S; hidpad_quit_changed(0); assert(quit_state.phase == HQ_PROMPT);
     push_value(simple, home, 0); push_value(simple, b, 1); assert(quit_state.phase == HQ_SETTLE);
     push_value(simple, b, 0); assert(quit_state.phase == HQ_IDLE);
     push_value(simple, home, 1);
-    quit_now += HQ_HOLD_S; hidpad_quit_changed(); assert(quit_state.phase == HQ_PROMPT);
+    quit_now += HQ_HOLD_S; hidpad_quit_changed(0); assert(quit_state.phase == HQ_PROMPT);
     push_value(simple, home, 0); push_value(simple, a, 1); assert(quit_state.phase == HQ_QUIT && buttons == DM_BTN_B);
-    puts("Nintendo 0x3F: Home hold and positional confirm/cancel with guest remapping: OK");
+    puts("Nintendo 0x3F: Home hold/tap, d-pad navigation and positional A/B with guest remapping: OK");
     hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(simple));
     // an 8BitDo (buttons in report 1): its own numbering, untouched
     TestDev *ebd = [TestDev new]; ebd.vid = PAD_HID_DEFAULT_VENDOR; ebd.name = @"8BitDo"; ebd.entry = 33; ebd.elements = @[elem(0, 1, 9, 1), elem(1, 1, 0xFF00, 1)];

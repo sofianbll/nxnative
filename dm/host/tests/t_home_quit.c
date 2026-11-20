@@ -64,6 +64,48 @@ int main(void) {
     CHECK(hq_enabled(NULL) && hq_enabled("1") && hq_enabled(""), "on by default");
     CHECK(!hq_enabled("0"), "DM_HOME_QUIT=0: off");
 
+    CHECK(!hq_menu_enabled(NULL, NULL) && !hq_menu_enabled("0", NULL), "no launcher opt-in: no Home menu");
+    CHECK(!hq_menu_enabled("1", "0") && hq_menu_enabled("1", NULL), "launcher opt-in respects DM_HOME_MENU=0");
+    q = (home_quit){.menu = hq_menu_enabled(NULL, NULL)};
+    hq_step(&q, 0, 1, 0, 0);
+    CHECK(hq_step(&q, 0.2, 0, 0, 0) == HQ_IDLE && !hq_blocks_input(q.phase), "short Home is unchanged without a launcher");
+    q = (home_quit){.menu = 1};
+    hq_step(&q, 0, 1, 0, 0);
+    CHECK(hq_step(&q, 0.2, 0, 0, 0) == HQ_MENU && q.sel == HQ_ROW_RESUME && hq_blocks_input(q.phase), "short Home opens the menu on Resume");
+    CHECK(hq_step(&q, 0.3, 0, 0, 1) == HQ_SETTLE, "B dismisses the menu to the game");
+    hq_step(&q, 0.4, 0, 0, 0);
+    hq_step(&q, 1, 1, 0, 0);
+    CHECK(hq_step(&q, 2, 0, 0, 0) == HQ_IDLE, "a medium press is neither a tap nor a hold");
+    hq_step(&q, 3, 1, 0, 0);
+    CHECK(hq_step(&q, 5, 1, 0, 0) == HQ_PROMPT, "a 2 s hold goes straight to the old quit prompt with the menu enabled");
+
+    q = (home_quit){.menu = 1, .no_hold = 1};
+    hq_step(&q, 0, 1, 0, 0);
+    CHECK(hq_step(&q, 2.1, 1, 0, 0) == HQ_HOLDING && hq_ring(&q, 2.1) < 0, "DM_HOME_QUIT=0 suppresses the hold and ring");
+    hq_step(&q, 2.2, 0, 0, 0);
+    hq_step(&q, 3, 1, 0, 0);
+    CHECK(hq_step(&q, 3.2, 0, 1, 0) == HQ_MENU, "DM_HOME_QUIT=0 does not turn off an opted-in short tap");
+    CHECK(hq_step(&q, 3.3, 0, 1, 0) == HQ_MENU, "A held at open cannot select Resume");
+    hq_step_nav(&q, 3.4, 0, 0, 0, 0, 1);
+    hq_step_nav(&q, 3.5, 0, 0, 0, 0, 1);
+    CHECK(q.sel == HQ_ROW_CONSOLE, "holding down moves to Back to console only once");
+    hq_step(&q, 3.6, 0, 0, 0);
+    hq_step_nav(&q, 3.7, 0, 0, 0, 0, 1);
+    CHECK(q.sel == HQ_ROW_QUIT, "a second down moves to Quit");
+    CHECK(hq_step(&q, 3.8, 0, 1, 0) == HQ_PROMPT && hq_step(&q, 3.9, 0, 1, 0) == HQ_PROMPT, "Quit still requires a second A in the prompt");
+    hq_step(&q, 4.0, 0, 0, 0);
+    CHECK(hq_step(&q, 4.1, 0, 1, 0) == HQ_QUIT, "quit via the menu confirms as before");
+
+    q = (home_quit){.menu = 1};
+    hq_step(&q, 0, 1, 0, 0);
+    hq_step(&q, 0.2, 0, 0, 0);
+    hq_step_nav(&q, 0.3, 0, 0, 0, 0, 1);
+    CHECK(hq_step(&q, 0.4, 0, 1, 0) == HQ_PAUSED && hq_blocks_input(q.phase), "Back to console pauses and holds input");
+    hq_cancel(&q);
+    CHECK(q.phase == HQ_PAUSED, "losing focus while hiding the app keeps it paused");
+    hq_resumed(&q);
+    CHECK(hq_step(&q, 0.5, 0, 1, 0) == HQ_SETTLE && hq_step(&q, 0.6, 0, 0, 0) == HQ_IDLE, "resume waits for A to be released before returning input");
+
     char out[64];
     hq_text_line("Hold\nQuit Zelda?\nLost\nQuit\nCancel", HQ_TEXT_TITLE, "d", out, sizeof out);
     CHECK(!strcmp(out, "Quit Zelda?"), "a line of the text");
@@ -73,6 +115,8 @@ int main(void) {
     CHECK(!strcmp(out, "Quit Mario?"), "an empty line takes the default");
     hq_text_line("Hold", HQ_TEXT_QUIT, "Quit", out, sizeof out);
     CHECK(!strcmp(out, "Quit"), "a missing line takes the default");
+    hq_text_line("Hold\nTitle\nNote\nQuit\nCancel\nResume\nConsole\nGame", HQ_TEXT_CONSOLE, "d", out, sizeof out);
+    CHECK(!strcmp(out, "Console"), "line seven localizes Back to console without shifting the original quit lines");
     hq_text_line(NULL, HQ_TEXT_HOLD, "Keep holding to quit", out, sizeof out);
     CHECK(!strcmp(out, "Keep holding to quit"), "no text: the defaults");
     char small[4]; hq_text_line("Abcdef", 0, "d", small, sizeof small);

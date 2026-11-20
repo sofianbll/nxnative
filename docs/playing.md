@@ -63,6 +63,8 @@ With [Press a button to join](settings.md#press-a-button-to-join) on in the sett
 
 To quit with a controller, hold its Home button (the logo button on an Xbox or PlayStation controller) for 2 seconds, then press A to quit or B to go back to the game. A raw HID controller using Nintendo's protocol can also quit this way, in simple (`0x3F`) or full (`0x30`) mode: the right face button confirms and the bottom one cancels, independently of in-game remapping. Quitting this way is the same as ⌘Q: progress the game has not saved is lost. If holding Home opens the Games app instead, macOS keeps the Home button for itself: its controller settings for the Home button decide whether apps may use it. `DM_HOME_QUIT=0` in `env.txt` turns the hold off.
 
+If your launcher [enables the Mac Home menu](frontends.md#mac-home-menu-and-background-pause), tap Home to resume, return to the launcher without quitting, or open the quit prompt. Use the D-pad or left stick to select a row. An online session may time out while the game is paused.
+
 ### Switch 2 controllers (Mac)
 
 Joy-Con 2 and the Pro Controller 2 do not appear in macOS's Bluetooth settings: they speak Nintendo's own Bluetooth LE protocol. Turn on **Switch 2 controllers** in the game's settings window ([Switch 2 controllers](settings.md#switch-2-controllers)), then:

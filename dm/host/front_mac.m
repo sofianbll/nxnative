@@ -1,7 +1,7 @@
 // Mac front end: with DM_WINDOW=1 open a window (CAMetalLayer, for the graphics backend to present frames) + keyboard and controllers → dm_input; the guest runs on a large-stack thread instead and the main thread belongs to AppKit.
 // Without DM_WINDOW: run the guest on the current thread with the default application task role (front_role.h).
 // The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN=1 starts it that way. ⌘Q quits, and so does a controller's Home button held for 2 s and
-// confirmed with A (home_quit.h); the left mouse button is the touchscreen.
+// confirmed with A (home_quit.h). A launcher can opt in to the short-press Home menu and background pause; the left mouse button is the touchscreen.
 // Cheats (hle_cheats.c): the Cheats menu's rows toggle, reload (⌘R) and open the cheats folder; its first item "Show Cheats
 // Window" (⌘⇧C, or DM_CHEATS_WINDOW=1 at launch) opens a Cheats panel beside the game: sections, search, the master switch,
 // safe mode, values, details and the import of cheat files (see the code below).
@@ -166,9 +166,11 @@ static int fn_shortcut(NSEvent *e) {
 }
 static ctrl_prompt g_cp; static int g_cp_confirm, g_cp_cancel;   // the controller applet's prompt (front_ctrl_support) and a key pressed in it since its last step
 static int cp_poll(void);
+static int hq_menu_key(unsigned short code, int down);
 static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
     unsigned short c = e.keyCode;
+    if (hq_menu_key(c, down)) return;
     if (cp_blocks_input(g_cp.phase)) {   // the prompt has the keyboard: Return or J (A) is done, Escape or K (B) closes it, no key reaches the game
         if (down && g_cp.phase == CP_OPEN) { if (c == 53 || c == 40) g_cp_cancel = 1; else if (c == 36 || c == 38) g_cp_confirm = 1; cp_poll(); }
         return;
@@ -202,6 +204,7 @@ static void pad_set(int p, uint64_t m, int32_t lx, int32_t ly, int32_t rx, int32
 }
 static void hq_poll(void);
 static home_quit g_hq;   // the Home button's hold and quit prompt (home_quit.h): while the prompt is open the controllers' input goes to it, not to the game
+static void hq_close(void);
 static int g_press_to_join;   // DM_PAD_PRESS_TO_JOIN=1, below pad_read
 static int pad_join(const void *owner, const char *name);
 static const char *pad_name(GCController *c);
@@ -231,7 +234,7 @@ static void pad_read(GCExtendedGamepad *g) {
     dm_haptics_apple_controller(p, g.controller);
     pad_set(p, m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
 }
-// Home and Capture: without this macOS takes them as system gestures (Home opens the Games app). Capture has no function in the host, Home quits when it is held (hq_poll).
+// Home and Capture: without this macOS takes them as system gestures (Home opens the Games app). Capture has no host action; Home goes to hq_poll.
 // macOS 27 respects the claim when the Home button setting for apps lets the app decide (hq_log_setting names it in the log)
 static void pad_keep_system_buttons(GCController *c) {
     for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled;
@@ -269,6 +272,7 @@ static int merge_pads_left(GCController *gone) {
 }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil on a connect)
 static void pads_changed(GCController *gone) {
+    if (g_hq.menu && g_hq.phase == HQ_HOLDING && gone.extendedGamepad.buttonHome.isPressed) hq_close();   // disconnection is not a tap
     if (g_merge) {
         int any = 0;
         for (GCController *c in GCController.controllers) if (jc1_gc_unread(c)) pad_keep_system_buttons(c);   // read from HID (pad_jc1_mac.h), a lone Joy-Con's too (no extended gamepad profile)
@@ -347,7 +351,10 @@ static void pads_reread(void) {
     for (s2_pad *d = dm_switch2_pads(); d; d = d->next) s2pad_read(d);
     for (jc1_pad *d = g_jc1_pads; d; d = d->next) jc1pad_read(d);
 }
-static void hq_close(void);
+static void keys_touch_release(void) {
+    g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
+    if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
+}
 static void input_release(void) {
     hq_close();   // the prompt or the hold indicator, if one is up: the Games app the system opens for Home takes the focus too
     [NSCursor setHiddenUntilMouseMoves:NO];
@@ -355,8 +362,7 @@ static void input_release(void) {
     g_input_on = 0;
     dm_motion_pro_active(0); hidpad_motion_clear();
     dm_switch2_active(0); dm_jc1_active(0);
-    g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
-    if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
+    keys_touch_release();
     pads_release();
 }
 static void input_resume(void) {
@@ -365,6 +371,7 @@ static void input_resume(void) {
     dm_motion_pro_active(1);
     dm_switch2_active(1); dm_jc1_active(1);
     pads_reread();
+    if (g_hq.menu) hq_poll();   // also sample Home on focus gain if only raw HID pads are connected
 }
 // Raw HID gamepads (pad_hid_mac.h): a player slot each, as a GameController controller, named by the device's product name. Identical pads that GameController lists
 // fewer of are read the same way, an identical Pro Controller from its report 0x30.
@@ -382,6 +389,7 @@ static void hidpad_show_player(hid_pad *d, int p, uint64_t m) {
     if (d->sink != p + 1) { d->sink = p + 1; dm_haptics_apple_set_sink(p, dm_hidpad_rumble); }   // its rumble goes over HID, not to a Core Haptics engine
 }
 static void hidpad_read(hid_pad *d) {
+    if (g_hq.menu && (g_hq.phase == HQ_MENU || g_hq.phase == HQ_SETTLE)) hq_poll();   // d-pad and sticks can change without Home/A/B
     if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
     int p = hidpad_player(d), full = hidpad_full(d);
     uint64_t m = full ? d->pro_m : pad_hid_buttons(&d->st);
@@ -405,9 +413,13 @@ static void hidpad_motion(hid_pad *d, const float acc[3], const float rot[3], ui
     dm_motion_set_hid(p, acc, rot, ns);
 }
 static void hidpad_models_changed(void) { pads_changed(nil); }
-static void hidpad_quit_changed(void) { if (g_input_on) hq_poll(); }
+static void hidpad_quit_changed(int interrupted) {
+    if (interrupted && g_hq.menu && g_hq.phase == HQ_HOLDING) hq_close();   // report mode switched or pad disconnected, not a tap
+    if (g_input_on) hq_poll();
+}
 static void hidpad_detach(hid_pad *d) {   // d is already off g_hidpads
-    if (hidpad_quit_buttons(d)) hidpad_quit_changed();
+    uint32_t q = hidpad_quit_buttons(d);
+    if (q) hidpad_quit_changed(!!(q & HIDPAD_QUIT_HOME));
     if (g_merge) {   // as pads_changed: released when the last controller goes away
         LOG("controller '%s' (HID) disconnected", d->name);
         int rumbles = 0; for (hid_pad *o = g_hidpads; o; o = o->next) rumbles |= hidpad_rumbles(o);
@@ -454,6 +466,7 @@ static int s2pad_attach(s2_pad *d) {   // 1: kept (a player, or waiting for its 
     return 1;
 }
 static void s2pad_detach(s2_pad *d) {   // d is already off g_s2pads
+    if (g_hq.menu && g_hq.phase == HQ_HOLDING && s2_pad_home(&d->st)) hq_close();
     if (g_merge) {
         LOG("controller '%s' (Bluetooth) disconnected", d->name);
         if (!dm_switch2_pads() && g_merge_sink == dm_switch2_rumble) merge_rumble_to(NULL);
@@ -490,6 +503,7 @@ static void jc1pad_attach(jc1_pad *d) {
     jc1pad_read(d);
 }
 static void jc1pad_detach(jc1_pad *d) {   // d is already off g_jc1_pads
+    if (g_hq.menu && g_hq.phase == HQ_HOLDING && jc1_pad_home(d)) hq_close();
     if (g_merge) {
         LOG("controller '%s' (HID) disconnected", d->name);
         if (!g_jc1_pads && g_merge_sink == dm_jc1_rumble) merge_rumble_to(NULL);
@@ -507,17 +521,24 @@ static void jc1_models_changed(void) { pads_changed(nil); }
 // Quit with the Home button (home_quit.h, LNPANDY/NX2Apple#336): held for 2 s it opens the prompt (home_quit_mac.h) over the game's view, A quits through the same path as ⌘Q
 // (NSApp terminate, so the save writer and the other exit handlers run as there), B or Home closes it. While the prompt is open the game is told it lost the focus, as the
 // Switch's HOME menu does, and gets no controller input or touch; the keyboard and ⌘Q work as always. DM_HOME_QUIT=0 turns it off
-static int g_hq_on;
-static NSTimer *g_hq_timer;   // while Home is held: the time runs on without a button change
-static NSView *g_hq_hold, *g_hq_prompt; static CAShapeLayer *g_hq_ring;
+static NSTimer *g_hq_timer;   // held Home or open overlay: time and controller changes even without a callback
+static NSView *g_hq_hold, *g_hq_prompt, *g_hq_menu; static CAShapeLayer *g_hq_ring;
+static GCController *g_hq_holder;
+static int g_hq_menu_quit;
 static char g_hq_text[HQ_TEXTS][256];
+static void bg_enter(void);
 static void hq_start(void) {
-    g_hq_on = hq_enabled(getenv("DM_HOME_QUIT"));
+    g_hq.no_hold = !hq_enabled(getenv("DM_HOME_QUIT"));
+    g_hq.menu = hq_menu_enabled(getenv("DM_HOME_MENU_LAUNCHER"), getenv("DM_HOME_MENU"));
     char title[256]; snprintf(title, sizeof title, "Quit %s?", DM_GAME_NAME);
-    const char *def[HQ_TEXTS] = {"Keep holding to quit", title, "Unsaved progress will be lost.", "Quit", "Cancel"};
+    const char *def[HQ_TEXTS] = {"Keep holding to quit", title, "Unsaved progress will be lost.", "Quit", "Cancel", "Resume", "Back to console mode", DM_GAME_NAME};
     const char *text = getenv("DM_HOME_QUIT_TEXT");   // a front end's, in the player's language: one line per text, in home_quit.h's order
-    for (int i = 0; i < HQ_TEXTS; i++) hq_text_line(text, i, def[i], g_hq_text[i], sizeof g_hq_text[i]);
-    LOG("front end: hold the Home button to quit %s", g_hq_on ? "is on" : "is off (DM_HOME_QUIT=0)");
+    for (int i = 0; i < HQ_TEXTS; i++) {
+        hq_text_line(text, i, def[i], g_hq_text[i], sizeof g_hq_text[i]);
+        if (![[NSString alloc] initWithUTF8String:g_hq_text[i]]) snprintf(g_hq_text[i], sizeof g_hq_text[i], "%s", def[i]);
+    }
+    LOG("front end: hold the Home button to quit %s", g_hq.no_hold ? "is off (DM_HOME_QUIT=0)" : "is on");
+    if (g_hq.menu) LOG("front end: Home menu with Back to console mode enabled");
 }
 // The Home button setting for apps (macOS 27), once, when the first controller is there (GameController reads it only while one is connected): "system" in the log
 // explains a hold that does nothing, since the system keeps Home whatever the host asks. A front end reads the setting itself (GCControllerHomeButtonSettingsManager)
@@ -549,64 +570,248 @@ static void hq_buttons(int *home, int *a, int *b, GCController **holder) {
         *home |= !!(q & HIDPAD_QUIT_HOME); *a |= !!(q & HIDPAD_QUIT_A); *b |= !!(q & HIDPAD_QUIT_B);
     }
 }
+static void hq_pad_dirs(uint64_t m, int32_t y, int *up, int *down) {
+    *up |= !!(m & DM_BTN_UP) || y > DM_STICK_MAX * HQ_STICK;
+    *down |= !!(m & DM_BTN_DOWN) || y < -DM_STICK_MAX * HQ_STICK;
+}
+static void hq_dirs(int *up, int *down) {
+    for (GCController *c in GCController.controllers) {
+        GCExtendedGamepad *g = c.extendedGamepad;
+        *up |= g.dpad.up.isPressed || g.leftThumbstick.yAxis.value > HQ_STICK;
+        *down |= g.dpad.down.isPressed || g.leftThumbstick.yAxis.value < -HQ_STICK;
+    }
+    for (s2_pad *d = dm_switch2_pads(); d; d = d->next) {
+        uint64_t m; int32_t s[4]; if (s2_pad_input(&d->st, &m, s)) hq_pad_dirs(m, s[1], up, down);
+    }
+    for (jc1_pad *d = g_jc1_pads; d; d = d->next) {
+        uint64_t m; int32_t s[4]; if (jc1_pad_state(d, &m, s)) hq_pad_dirs(m, s[1], up, down);
+    }
+    for (hid_pad *d = g_hidpads; d; d = d->next) hidpad_menu_dirs(d, up, down, DM_STICK_MAX * HQ_STICK);
+}
 static void hq_fade(NSView *v, int in) {
     if (!v) return;
     if (in) v.alphaValue = 0;
     [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) { ctx.duration = 0.18; v.animator.alphaValue = in ? 1 : 0; }
                         completionHandler:^{ if (!in) [v removeFromSuperview]; }];
 }
-static void hq_hide_hold(void) { [g_hq_timer invalidate]; g_hq_timer = nil; [g_hq_hold removeFromSuperview]; g_hq_hold = nil; g_hq_ring = nil; }
+static void hq_tick(void) {
+    hq_phase p = g_hq.phase;
+    int want = g_input_on && (p == HQ_HOLDING || (g_hq.menu && (p == HQ_MENU || p == HQ_PROMPT || p == HQ_SETTLE)));
+    if (want && !g_hq_timer) g_hq_timer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *t) { (void)t; hq_poll(); }];
+    if (!want && g_hq_timer) { [g_hq_timer invalidate]; g_hq_timer = nil; }
+}
+static void hq_hide_hold(void) { [g_hq_hold removeFromSuperview]; g_hq_hold = nil; g_hq_ring = nil; }
 static void hq_hide_prompt(void) { hq_fade(g_hq_prompt, 0); g_hq_prompt = nil; }
+static void hq_select(int row);
+static void hq_show_menu(void) {
+    NSView *cv = g_win.contentView;
+    NSArray *labels = @[@(g_hq_text[HQ_TEXT_RESUME]), @(g_hq_text[HQ_TEXT_CONSOLE]), @(g_hq_text[HQ_TEXT_QUIT])];
+    NSView *menu = hq_menu_view(cv.bounds, @(g_hq_text[HQ_TEXT_MENU_TITLE]), labels, g_hq.sel, ^(NSInteger row) { hq_select((int)row); });
+    [g_hq_menu removeFromSuperview]; g_hq_menu = menu;
+    [cv addSubview:menu];
+}
+static void hq_hide_menu(void) { [g_hq_menu removeFromSuperview]; g_hq_menu = nil; }
 static void hq_changed(hq_phase was, hq_phase now, GCController *holder) {
     if (was == HQ_HOLDING) hq_hide_hold();
     NSView *cv = g_win.contentView;
     switch (now) {
     case HQ_HOLDING:
-        g_hq_timer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *t) { (void)t; hq_poll(); }];
+        g_hq_holder = holder;
+        break;
+    case HQ_MENU:
+        pads_release(); keys_touch_release();
+        dm_focus_set(2);
+        hq_show_menu();
+        LOG("front end: Home pressed, Home menu open");
         break;
     case HQ_PROMPT: {
+        hq_hide_menu();
+        g_hq_menu_quit = was == HQ_MENU;
         pads_release();   // nothing the game held stays pressed while the prompt has the controllers
         if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
         dm_focus_set(2);
-        GCExtendedGamepad *g = holder.extendedGamepad;
+        GCExtendedGamepad *g = (g_hq_menu_quit ? g_hq_holder : holder).extendedGamepad;
         g_hq_prompt = hq_prompt_view(cv.bounds, @(g_hq_text[HQ_TEXT_TITLE]), @(g_hq_text[HQ_TEXT_NOTE]), @(g_hq_text[HQ_TEXT_QUIT]), @(g_hq_text[HQ_TEXT_CANCEL]),
                                      g.buttonA.sfSymbolsName, g.buttonB.sfSymbolsName);
         [cv addSubview:g_hq_prompt]; hq_fade(g_hq_prompt, 1);
-        LOG("front end: Home held, quit prompt open");
+        LOG("front end: %s, quit prompt open", was == HQ_MENU ? "Quit chosen in the Home menu" : "Home held");
         break;
     }
     case HQ_SETTLE:
-        hq_hide_prompt(); dm_focus_set(1);
-        LOG("front end: quit prompt closed, the game goes on");
+        hq_hide_menu(); hq_hide_prompt(); dm_focus_set(1);
+        LOG("front end: %s closed, the game goes on", was == HQ_MENU ? "Home menu" : "quit prompt");
         break;
     case HQ_IDLE:
+        g_hq_holder = nil;
         if (was == HQ_SETTLE) pads_reread();   // the game reads the controllers again, as they are now
         break;
     case HQ_QUIT:
         LOG("front end: quit from the Home button prompt");
         [NSApp terminate:nil];   // as ⌘Q
         break;
+    case HQ_PAUSED:
+        hq_hide_menu(); g_hq_holder = nil;
+        bg_enter();
+        break;
     }
 }
+static void hq_select(int row) {
+    if (g_hq.phase != HQ_MENU) return;
+    hq_choose(&g_hq, row);
+    hq_changed(HQ_MENU, g_hq.phase, nil);
+    hq_tick();
+}
+static int hq_menu_key(unsigned short code, int down) {
+    if (g_hq.phase == HQ_PROMPT && g_hq_menu_quit) {
+        if (down && (code == 53 || code == 40 || code == 36 || code == 38)) {
+            g_hq.phase = code == 53 || code == 40 ? HQ_SETTLE : HQ_QUIT;
+            hq_changed(HQ_PROMPT, g_hq.phase, nil);
+            hq_tick();
+        }
+        return 1;
+    }
+    if (g_hq.phase != HQ_MENU) return 0;
+    if (down) {
+        if (code == 126 || code == 125) {
+            int was = g_hq.sel;
+            hq_move(&g_hq, code == 126, code == 125); if (was != g_hq.sel) hq_show_menu();
+        }
+        else if (code == 53 || code == 40) hq_select(HQ_ROW_RESUME);   // Escape or K (B)
+        else if (code == 36 || code == 38) hq_select(g_hq.sel);       // Return or J (A)
+    }
+    return 1;
+}
 static void hq_poll(void) {
-    static int busy; if (!g_hq_on || !g_win || busy) return;
+    static int busy; if ((!g_hq.menu && g_hq.no_hold) || !g_win || !g_input_on || busy) return;
     busy = 1;
-    int home, a, b; GCController *holder = nil; hq_buttons(&home, &a, &b, &holder);
+    int home, a, b, up = 0, down = 0; GCController *holder = nil; hq_buttons(&home, &a, &b, &holder);
+    if (g_hq.menu && (g_hq.phase == HQ_MENU || g_hq.phase == HQ_HOLDING)) hq_dirs(&up, &down);
     double now = CACurrentMediaTime();
-    hq_phase was = g_hq.phase, ph = hq_step(&g_hq, now, home, a, b);
+    int sel = g_hq.sel;
+    hq_phase was = g_hq.phase, ph = hq_step_nav(&g_hq, now, home, a, b, up, down);
     if (ph != was) hq_changed(was, ph, holder);
+    else if (ph == HQ_MENU && sel != g_hq.sel) hq_show_menu();
     double fill = hq_ring(&g_hq, now);
     if (fill >= 0) {
         if (!g_hq_hold) { NSView *cv = g_win.contentView; CAShapeLayer *ring = nil; g_hq_hold = hq_hold_view(cv.bounds, @(g_hq_text[HQ_TEXT_HOLD]), &ring); g_hq_ring = ring; [cv addSubview:g_hq_hold]; hq_fade(g_hq_hold, 1); }
         hq_hold_set(g_hq_ring, fill);
     }
+    hq_tick();
     busy = 0;
 }
 static void hq_close(void) {
-    if (g_hq.phase == HQ_IDLE || g_hq.phase == HQ_QUIT) return;
+    if (g_hq.phase == HQ_IDLE || g_hq.phase == HQ_QUIT || g_hq.phase == HQ_PAUSED) return;
     if (g_hq.phase == HQ_PROMPT) LOG("front end: quit prompt closed, the window lost the focus");
-    hq_cancel(&g_hq); hq_hide_hold(); hq_hide_prompt();
+    hq_cancel(&g_hq); hq_hide_hold(); hq_hide_prompt(); hq_hide_menu(); g_hq_holder = nil; hq_tick();
 }
+
+// Launcher handoff from NX2Apple 0035 (see home_quit.h). Use the window's normal minimize/restore lifecycle, not a process or network suspend.
+enum { BG_PLAYING, BG_HIDING, BG_HIDDEN };
+static int g_bg, g_bg_fullscreen, g_bg_resume_pending, g_bg_fs_transition;
+static unsigned g_bg_generation;   // a timeout from a previous pause must not hide a later session
+
+static void game_suspend(void) { input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }
+static void game_restore(void) { dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }
+static NSString *bg_name(NSString *action) { return [NSString stringWithFormat:@"org.nxnative.%@.%d", action, getpid()]; }
+static void bg_post(NSString *action) {
+    [NSDistributedNotificationCenter.defaultCenter postNotificationName:bg_name(action) object:nil userInfo:nil deliverImmediately:YES];
+}
+
+static void bg_restore_fullscreen(void) {
+    if (g_bg || !g_bg_fullscreen || g_bg_fs_transition || !NSApp.isActive || !g_win.isOnActiveSpace) return;
+    g_bg_fullscreen = 0;
+    if (!(g_win.styleMask & NSWindowStyleMaskFullScreen)) [g_win toggleFullScreen:nil];
+}
+static void bg_front(void) {
+    if (NSApp.hidden) [NSApp unhide:nil];
+    [g_win makeKeyAndOrderFront:nil];
+    if (!NSApp.isActive) [NSApp activate];
+}
+static void bg_resume(void) {
+    if (g_bg == BG_HIDING) { g_bg_resume_pending = 1; return; }
+    if (g_bg != BG_HIDDEN) return;
+    g_bg = BG_PLAYING;
+    hq_resumed(&g_hq);
+    game_restore();
+    bg_front();
+    if (!g_input_on && g_win.isKeyWindow && NSApp.isActive) { input_resume(); dm_focus_set(1); }
+    hq_tick();
+    // macOS may still be leaving the launcher's Space; the active-Space observer also tries once it is ready.
+    unsigned gen = g_bg_generation;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 4), dispatch_get_main_queue(), ^{
+        if (gen == g_bg_generation) bg_restore_fullscreen();
+    });
+    LOG("front end: resumed");
+    bg_post(@"resumed");
+}
+static void bg_hide(void) {
+    if (g_bg != BG_HIDING) return;
+    const char *value = getenv("DM_LAUNCHER_BUNDLE_ID");
+    NSString *bid = value ? [[NSString alloc] initWithUTF8String:value] : nil;
+    if (bid.length) {
+        NSRunningApplication *launcher = [NSRunningApplication runningApplicationsWithBundleIdentifier:bid].firstObject;
+        if (launcher) {
+            [NSApp yieldActivationToApplication:launcher];
+            if (![launcher activateFromApplication:NSRunningApplication.currentApplication options:NSApplicationActivateAllWindows])
+                LOG("front end: launcher did not take activation");
+        } else {
+            NSURL *url = [NSWorkspace.sharedWorkspace URLForApplicationWithBundleIdentifier:bid];
+            if (url) [NSWorkspace.sharedWorkspace openApplicationAtURL:url configuration:NSWorkspaceOpenConfiguration.configuration completionHandler:nil];
+            else LOG("front end: launcher bundle unavailable");
+        }
+    }
+    [NSApp hide:nil];
+    g_bg = BG_HIDDEN;
+    LOG("front end: paused in the background");
+    bg_post(@"paused");
+    if (g_bg_resume_pending) bg_resume();
+}
+static void bg_exit_fullscreen(void) {
+    if (g_bg != BG_HIDING || g_bg_fs_transition) return;
+    if (g_win.styleMask & NSWindowStyleMaskFullScreen) [g_win toggleFullScreen:nil];
+    else bg_hide();
+}
+static void bg_enter(void) {
+    g_bg = BG_HIDING;
+    g_bg_fullscreen |= g_bg_fs_transition > 0 || (g_win.styleMask & NSWindowStyleMaskFullScreen) != 0;
+    g_bg_resume_pending = 0;
+    unsigned gen = ++g_bg_generation;
+    game_suspend();
+    bg_exit_fullscreen();
+    if (g_bg == BG_HIDING) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        if (g_bg == BG_HIDING && gen == g_bg_generation) {
+            LOG("front end: fullscreen exit did not finish, hiding the paused game");
+            bg_hide();
+        }
+    });
+}
+static void bg_start(void) {
+    if (!g_hq.menu) return;
+    NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
+    for (NSNotificationName name in @[NSWindowWillEnterFullScreenNotification, NSWindowWillExitFullScreenNotification])
+        [nc addObserverForName:name object:g_win queue:nil usingBlock:^(NSNotification *n) {
+            g_bg_fs_transition = [n.name isEqualToString:NSWindowWillEnterFullScreenNotification] ? 1 : -1;
+        }];
+    for (NSNotificationName name in @[NSApplicationDidBecomeActiveNotification, NSApplicationDidUnhideNotification])
+        [nc addObserverForName:name object:NSApp queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+            (void)n;
+            if (g_bg == BG_HIDDEN && !NSApp.hidden) bg_resume();
+            else if ([name isEqualToString:NSApplicationDidBecomeActiveNotification]) bg_restore_fullscreen();
+        }];
+    [NSWorkspace.sharedWorkspace.notificationCenter addObserverForName:NSWorkspaceActiveSpaceDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        (void)n; bg_restore_fullscreen();
+    }];
+    NSDistributedNotificationCenter *dc = NSDistributedNotificationCenter.defaultCenter;
+    [dc addObserverForName:bg_name(@"resume") object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        (void)n; if (g_bg) bg_resume(); else bg_front();
+    }];
+    [dc addObserverForName:bg_name(@"quit") object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        (void)n;
+        if (g_bg) { dm_gfx_suspend(0); dm_audio_suspend(0); }   // release the gate before running the normal exit handlers
+        [NSApp terminate:nil];
+    }];
+}
+
 // The controller applet's prompt (front.h front_ctrl_support, ctrl_prompt.h; GitHub issue #1640): the game asked for more players than it sees, and the game's thread waits while
 // the prompt is up over the game, as the Switch's player screen. A controller that joins meanwhile is a player at once (its first button with DM_PAD_PRESS_TO_JOIN, its
 // connection without), and the count on the card follows. A and B are GameController's buttonA and buttonB on any controller, as the Home prompt's (a raw HID pad's A and B,
@@ -661,8 +866,7 @@ int front_ctrl_support(int min, int max) {
     if (!g_layer) return -1;
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     dispatch_async(dispatch_get_main_queue(), ^{
-        g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();   // nothing the game held stays pressed while the prompt has the input
-        if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
+        keys_touch_release();   // nothing the game held stays pressed while the prompt has the input
         pads_release();
         int a, b; cp_buttons(&a, &b);
         g_cp_done = done; cp_open(&g_cp, min, max, dm_players_reported(), a, b);
@@ -700,7 +904,7 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
 @implementation DmGameView
 - (void)mouseDown:(NSEvent *)e { [self mouseDragged:e]; }
 - (void)mouseDragged:(NSEvent *)e {
-    if (!g_input_on) return;
+    if (!g_input_on || g_hq.phase == HQ_MENU) return;
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;
     double w = b.width, h = b.height;
     if (w <= 0 || h <= 0) return;
@@ -726,7 +930,12 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
 static void (^g_fs_failed)(void);
 @interface DmWinDelegate : NSObject <NSWindowDelegate> @end
 @implementation DmWinDelegate
-- (void)windowDidFailToEnterFullScreen:(NSWindow *)w { (void)w; if (g_fs_failed) g_fs_failed(); }
+- (void)windowDidFailToEnterFullScreen:(NSWindow *)w {
+    (void)w; g_bg_fs_transition = 0;
+    if (g_bg == BG_HIDING) bg_exit_fullscreen();
+    else if (g_fs_failed) g_fs_failed();
+}
+- (void)windowDidFailToExitFullScreen:(NSWindow *)w { (void)w; g_bg_fs_transition = 0; bg_hide(); bg_restore_fullscreen(); }
 @end
 
 typedef struct { void (*fn)(void); } guest_arg;
@@ -1648,14 +1857,14 @@ void front_run(void (*guest)(void)) {
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
         NSApp.mainMenu = bar;
+        static DmWinDelegate *wd; wd = [DmWinDelegate new]; win.delegate = wd;
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
         if (fs && strcmp(fs, "0")) {
             // A game opened from a fullscreen app starts while macOS leaves that Space. Wait for activation and for the window to reach the active Space before asking for fullscreen
             // (whichever happens last), and repeat a refused startup request once. Only a request made here owns a retry; a later player request must never restart startup handling
-            static DmWinDelegate *wd; wd = [DmWinDelegate new]; win.delegate = wd;
             __block int want = 1, retried = 0, entering = 0;
             void (^enter)(void) = ^{
-                if (!want || (win.styleMask & NSWindowStyleMaskFullScreen) || !NSApp.isActive || !win.isOnActiveSpace) return;
+                if (!want || g_bg || (win.styleMask & NSWindowStyleMaskFullScreen) || !NSApp.isActive || !win.isOnActiveSpace) return;
                 want = 0; entering = 1; [win toggleFullScreen:nil]; };
             g_fs_failed = ^{
                 if (!entering) return;
@@ -1698,15 +1907,23 @@ void front_run(void (*guest)(void)) {
         [nc addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); }];
         // Entering and leaving fullscreen: the layer is layer-backed, so its frame (and with it the drawable) follows the
         // content view by itself; only the scale factor has to be carried over to the screen the window ended up on. The screen's rate is matched in fullscreen only (screen_match_apply)
-        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); g_fullscreen = 1; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
-        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); }];
+        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) {
+            (void)n; screen_refresh(win.screen); g_fullscreen = 1; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply();
+            g_bg_fs_transition = 0; if (g_bg == BG_HIDING) dispatch_async(dispatch_get_main_queue(), ^{ bg_exit_fullscreen(); });
+        }];
+        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) {
+            (void)n; g_fullscreen = 0; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply();
+            g_bg_fs_transition = 0; bg_hide();
+            if (!g_bg && g_bg_fullscreen) dispatch_async(dispatch_get_main_queue(), ^{ bg_restore_fullscreen(); });   // an exit that finished after the timeout
+        }];
         // DM_FOCUS_KEEP=1 (scripts/regress.py): the game stays in focus while its window is up, whichever app is active. Tears of the Kingdom stops presenting out of focus, so
         // another app taking the key window during an unattended run read as a hang (no frame after the last focus change)
         static int keep = -1; if (keep < 0) keep = getenv("DM_FOCUS_KEEP") && atoi(getenv("DM_FOCUS_KEEP"));
-        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); if (!win.miniaturized && !g_text_box && !keep) dm_focus_set(2); }];
-        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); dm_focus_set(1); }];
-        [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
-        [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];
+        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; if (g_bg) return; input_release(); if (!win.miniaturized && !g_text_box && !keep) dm_focus_set(2); }];
+        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; if (g_bg) return; input_resume(); dm_focus_set(1); hq_tick(); }];
+        [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; if (!g_bg) game_suspend(); }];
+        [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; if (!g_bg) game_restore(); }];
+        bg_start();
         display_awake(win.isKeyWindow);   // the window may have become key (makeKeyAndOrderFront above) before these observers were installed
         // Guest thread: 64 MiB stack (the Switch main thread stack is specified by npdm; the host gives plenty)
         static guest_arg ga; ga.fn = guest;

@@ -5,6 +5,7 @@ A graphical app that packs games, keeps a library of them or starts them is a pr
 - [Building: the NSP script](#building-the-nsp-script)
 - [The settings list](#the-settings-list)
 - [Starting a game](#starting-a-game)
+- [Mac Home menu and background pause](#mac-home-menu-and-background-pause)
 - [An app that hosts the engine](#an-app-that-hosts-the-engine)
 - [Microphone input on Mac](#microphone-input-on-mac)
 - [Nextendo on Mac](#nextendo-on-mac)
@@ -63,6 +64,25 @@ A Mac game quits when the player holds a controller's Home button for 2 seconds 
 Settings a player chose in a front end and wants kept, also for a start from Finder or the Dock, go in the app's saved choices ([Saved choices](#saved-choices)), not in its environment.
 
 **An IPA** is installed by the player (sideloading); its own settings screen starts the game. Lines in the app's `Documents/env.txt` win over that screen ([Settings in a file](settings.md#settings-in-a-file)). The save and `log.txt` are in the app's Documents folder.
+
+### Mac Home menu and background pause
+
+Set `DM_HOME_MENU_LAUNCHER=1` in the Mac game's launch environment to opt in. A Home press shorter than 0.5 seconds opens **Resume**, **Back to console mode**, and **Quit**. Navigate with the D-pad or left stick; A selects, B or Home closes the menu. Quit opens the normal confirmation. Without this opt-in, or with `DM_HOME_MENU=0`, short Home does nothing. `DM_HOME_QUIT=0` still disables the 2-second hold and its indicator; it does not turn off an opted-in menu.
+
+For localization, append **Resume**, **Back to console mode**, and the menu title (normally the game name) as lines 6–8 of `DM_HOME_QUIT_TEXT`. The first five lines are unchanged and line 4 also labels the menu's Quit row. Empty or missing lines keep their defaults.
+
+Back to console mode releases input, reports background focus (`3`) and suspends audio and graphics as when minimizing the game. The host exits fullscreen before hiding (or hides if macOS refuses the exit). Set `DM_LAUNCHER_BUNDLE_ID` to the launcher's bundle identifier so the host yields activation to it or opens it if installed but not running. Without a usable bundle identifier the game still hides. This is not a process stop (`SIGSTOP`/`SIGCONT`); it does not pause Nextendo's network session, which can time out while the game is paused.
+
+The wire names and payloads match [NX2Apple patch 0035](https://github.com/LNPANDY/NX2Apple/blob/7541e9e2f15b8beda26ff5d7b405e234e4015ed2/patches/0035-mac-home-menu-and-background-pause.patch). Use the macOS distributed notification center in the same login session. `<pid>` is the decimal PID of the **`dmhost` child**, not the outer `Contents/MacOS/nxnative` launcher. Subscribe for that PID; all four notifications use `object: nil`, `userInfo: nil` and immediate delivery. Games that have not enabled the menu neither listen nor post.
+
+| Notification | Sender → receiver | Meaning |
+|---|---|---|
+| `org.nxnative.paused.<pid>` | Host → launcher | Audio and graphics are suspended and the game is hidden. |
+| `org.nxnative.resume.<pid>` | Launcher → host | Unhide, restore audio and graphics, return input when the window is key and return to fullscreen if it was fullscreen. If already running, bring the game forward without a state notification. |
+| `org.nxnative.resumed.<pid>` | Host → launcher | The background pause is over, including when the player brought the game forward via the Dock or app switcher. Fullscreen re-entry can finish asynchronously. |
+| `org.nxnative.quit.<pid>` | Launcher → host | Quit like ⌘Q, lifting the pause for the exit handlers if needed. Observe process exit; there is no quit acknowledgement. |
+
+The launcher should yield activation to the game (`yieldActivation(to:)` or `yieldActivation(toApplicationWithBundleIdentifier:)`) before requesting resume. The host also logs `front end: paused in the background` and `front end: resumed`. These are local, unauthenticated notifications, not a durable session channel.
 
 ## Local users and the account selector
 
