@@ -468,7 +468,7 @@ namespace Ryujinx.Graphics.Shader.Translation
             Operand samplerIndex = Argument(1);
             Operand index = GetScaleIndex(context, samplerIndex);
 
-            Operand scale = context.Load(StorageKind.ConstantBuffer, 0, Const((int)SupportBufferField.RenderScale), index);
+            Operand scale = context.Load(StorageKind.ConstantBuffer, 0, Const((int)SupportBufferField.RenderScale), index, Const(0));
 
             Operand scaleIsOne = context.FPCompareEqual(scale, ConstF(1f));
             Operand lblScaleNotOne = Label();
@@ -518,21 +518,16 @@ namespace Ryujinx.Graphics.Shader.Translation
             Operand input = Argument(0);
             Operand samplerIndex = Argument(1);
             Operand index = GetScaleIndex(context, samplerIndex);
+            Operand component = Argument(2);
+            Operand lod = Argument(3);
+            // y/z carry the exact guest extent of the bound view's first mip, or zero for an unscaled texture.
+            Operand baseSize = context.Load(StorageKind.ConstantBuffer, 0, Const((int)SupportBufferField.RenderScale), index, component);
+            Operand hasGuestSize = context.FPCompareLess(ConstF(0f), baseSize);
+            Operand shift = context.IClampS32(lod, Const(0), Const(31));
+            Operand guestSize = context.IMaximumU32(context.ShiftRightU32(context.FP32ConvertToS32(baseSize), shift), Const(1));
+            context.Return(context.ConditionalSelect(hasGuestSize, guestSize, input));
 
-            Operand scale = context.FPAbsolute(context.Load(StorageKind.ConstantBuffer, 0, Const((int)SupportBufferField.RenderScale), index));
-
-            Operand scaleIsOne = context.FPCompareEqual(scale, ConstF(1f));
-            Operand lblScaleNotOne = Label();
-
-            context.BranchIfFalse(lblScaleNotOne, scaleIsOne);
-            context.Return(input);
-            context.MarkLabel(lblScaleNotOne);
-
-            Operand inputUnscaled = context.FPDivide(context.IConvertS32ToFP32(input), scale);
-
-            context.Return(context.FP32ConvertToS32(inputUnscaled));
-
-            return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks, "TextureSizeUnscale", true, 2, 0);
+            return new Function(ControlFlowGraph.Create(context.GetOperations()).Blocks, "TextureSizeUnscale", true, 4, 0);
         }
 
         private Operand GetScaleIndex(EmitterContext context, Operand index)

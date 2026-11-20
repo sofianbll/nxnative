@@ -158,7 +158,7 @@ def decode_ubo_img(name):
     m = re.match(r'[a-z]+_i\w*?_cb(\d+)_([0-9A-F]+)', name)
     return (int(m.group(1)) - 3, int(m.group(2), 16) * 4) if m and 3 <= int(m.group(1)) <= 16 else None
 
-def buffer_image_bias(name, res):
+def resource_field(name, res, field):
     """A buffer image's or buffer texture's index in the offset table (dmsh_abi.h DMSH_TBIAS_BANK), which the translator gives it as "tbx" (TranslationFlags.MetalBufferImageBias),
     found by the constant buffer slot and the handle its name carries (<stage>_i_cb<slots>_<handle>_<format> for an image, <stage>_t_cb<slots>_<handle> for a texture, <stage>_tb_...
     for an array of buffer textures, _tcb_<handle> for a handle in no constant buffer) in the translator's images or textures; None for any other binding. An array's is its first
@@ -166,7 +166,10 @@ def buffer_image_bias(name, res):
     m = re.match(r'[a-z]+_([ti])[a-z0-9]*_(?:cb(\d+)|tcb)_([0-9A-F]+)(?:_|$)', name)
     if not m: return None
     slots, h = int(m.group(2)) if m.group(2) else None, int(m.group(3), 16)
-    return next((i['tbx'] for i in res.get('images' if m.group(1) == 'i' else 'textures', ()) if 'tbx' in i and i['handle'] == h and (i['cbuf_slot'] == slots if slots is not None else i['cbuf_slot'] < 0)), None)
+    return next((i[field] for i in res.get('images' if m.group(1) == 'i' else 'textures', ()) if field in i and i['handle'] == h and (i['cbuf_slot'] == slots if slots is not None else i['cbuf_slot'] < 0)), None)
+
+def buffer_image_bias(name, res):
+    return resource_field(name, res, 'tbx')
 
 def buffer_bias_entries(res):
     """The offset table's length in entries, as the translator declares it (uint4 data[], ResourceManager.GetBufferImageBiasBinding): every entry given out, an array's one per element"""
@@ -480,6 +483,8 @@ def reflect(key, stage, msl, res):
             if (x := buffer_image_bias(nm, res)) is not None and any(t.get('row_bias') and t.get('tbx') == x for t in res.get('textures', ())):
                 e['tbx'] = x
                 e['fetch1d'] = True
+        if e.get('kind') in (abi.KIND_TEX, abi.KIND_TEX_UBO, abi.KIND_IMG, abi.KIND_IMG_UBO) and not ty.startswith('array<'):
+            if (idx := resource_field(nm, res, 'rs_index')) is not None: e['rs_index'] = idx
         binds.append(e)
     # Storage buffers: SPIR-V binding number → c0 offset → NVN storage buffer slot (c0 base SSBO[stage], C0_ROW bytes per slot)
     base = SSBO.get(stage)   # storage buffer base for the hull / domain stages has not been measured: a storage buffer there is reported with no slot

@@ -280,9 +280,13 @@ static class SwshXlate
                 foreach (var b in p.Info.CBuffers) res["cbufs"].AsArray().Add((JsonNode)new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot, ["fixed"] = b.FixedSize });   // fixed: a game uniform slot's bytes read at fixed offsets (TranslationFlags.MetalUniformBounds), which the host makes readable
                 foreach (var b in p.Info.SBuffers) res["sbufs"].AsArray().Add((JsonNode)new JsonObject { ["binding"] = b.Binding, ["slot"] = b.Slot, ["cb_slot"] = b.SbCbSlot, ["cb_offset"] = b.SbCbOffset, ["flags"] = (int)b.Flags });   // flags: 1 written, 2 bounded by the length table (TranslationFlags.MetalStorageBounds; dmsh_reflect.py gives the binding its "sbx")
                 foreach (var (list, name) in new[] { (p.Info.Textures, "textures"), (p.Info.Images, "images") })
-                    foreach (var t in list)
+                    for (int i = 0; i < list.Count; i++)
                     {
+                        var t = list[i];
                         var o = new JsonObject { ["binding"] = t.Binding, ["type"] = (int)t.Type, ["format"] = t.Format.ToString(), ["cbuf_slot"] = t.CbufSlot, ["handle"] = t.HandleIndex, ["array"] = t.ArrayLength, ["separate"] = t.Separate, ["flags"] = (int)t.Flags };
+                        int scaleIndex = name == "images" ? p.Info.Textures.Count(t => t.ArrayLength == 1) + i : i;
+                        if (t.ArrayLength == 1 && scaleIndex < 72 && (name == "images" || i < 64))
+                            o["rs_index"] = scaleIndex;
                         if (t.BufferBias >= 0) o["tbx"] = t.BufferBias;
                         if (t.BufferBias >= 0 && (t.Type & SamplerType.Mask) == SamplerType.Texture2D) o["row_bias"] = true;   // a buffer image's or buffer texture's index in the offset table (TranslationFlags.MetalBufferImageBias; dmsh_reflect.py gives it to the binding, nvn_mtl.m tbuf_lead)
                         res[name].AsArray().Add((JsonNode)o);

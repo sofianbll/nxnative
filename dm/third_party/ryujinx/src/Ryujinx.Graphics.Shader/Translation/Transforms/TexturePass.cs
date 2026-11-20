@@ -104,10 +104,16 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
                 !isBindless &&
                 !isIndexed &&
                 stage.SupportsRenderScale &&
+                !texOp.Type.HasFlag(SamplerType.Multisample) &&
                 TypeSupportsScale(texOp.Type))
             {
-                int functionId = hfm.GetOrCreateFunctionId(HelperFunctionName.TextureSizeUnscale);
                 int samplerIndex = resourceManager.FindTextureDescriptorIndex(texOp.Binding);
+                if (samplerIndex < 0 || samplerIndex >= 64)
+                {
+                    return node;
+                }
+
+                int functionId = hfm.GetOrCreateFunctionId(HelperFunctionName.TextureSizeUnscale);
 
                 for (int index = texOp.DestsCount - 1; index >= 0; index--)
                 {
@@ -128,7 +134,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
                         }
                     }
 
-                    Operand[] callArgs = [Const(functionId), dest, Const(samplerIndex)];
+                    Operand[] callArgs = [Const(functionId), dest, Const(samplerIndex), Const(1 + texOp.Index), texOp.GetSource(0)];
 
                     node.List.AddAfter(node, new Operation(Instruction.Call, 0, unscaledSize, callArgs));
                 }

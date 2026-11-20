@@ -99,6 +99,10 @@
 
 // Ryujinx support_buffer: the unused y component of render_scale[0] carries Z-A's opt-in cascade filter (float 0 or 1).
 #define DMSH_SUPPORT_SHADOW_CASCADES_OFF 196
+// Render scale float4 rows: x = scale; y/z = exact unscaled width/height at the first mip of a scaled view (zero otherwise).
+// Row 0 is for the render pass and keeps the shadow cascade switch in y.
+#define DMSH_SUPPORT_SCALE_OFF 192
+#define DMSH_SUPPORT_SCALE_SLOTS 73
 
 // Binding kinds: the "kind" of each binding in a shader's <key>_b.json, as the build writes it and the host reads it (nvn_refl.m turns each into an NVN_RB_* code, nvn_refl.h)
 #define DMSH_KIND_CBUF "cbuf"            // uniform buffer slot reg (c[3 + reg]); fixed = its bytes the shader reads at fixed offsets
