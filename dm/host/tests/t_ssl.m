@@ -272,7 +272,10 @@ static NSMutableData *store_fixture(uint32_t status) {
     NSMutableData *data = [NSMutableData dataWithLength:24 + caDer.length]; uint32_t header[] = {0x546c7373, 1, 1, status, (uint32_t)caDer.length, 16};
     memcpy(data.mutableBytes, header, sizeof header); memcpy((char *)data.mutableBytes + 24, caDer.bytes, caDer.length); return data;
 }
-static bool stand_in_ca(const uint8_t **der, size_t *size) { *der = caDer.bytes; *size = caDer.length; return true; }
+static bool stand_in_ca(size_t index, uint32_t *id, const uint8_t **der, size_t *size) {
+    if (index) return false;
+    *id = 1; *der = caDer.bytes; *size = caDer.length; return true;
+}
 static void builtin_store(void) {
     typedef uint32_t (*GetSize)(unsigned *, const uint32_t *, unsigned);
     typedef uint32_t (*GetCerts)(void **, uint8_t *, unsigned, const uint32_t *, unsigned);

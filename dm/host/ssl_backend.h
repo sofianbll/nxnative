@@ -18,10 +18,10 @@ void dm_ssl_set_peer_pin_policy(dm_ssl_peer_policy_provider provider);
 // Optional exact-host admission guard. Install before startup; NULL retains the
 // adapter's normal strict certificate/hostname validation without routing policy.
 void dm_ssl_set_peer_guard(bool (*guard)(const char *guest_host));
-// Optional stand-in for the player's firmware certificate store. With no store, a built-in certificate request is answered with this one CA, under each ID
-// asked for: the online service's own CA, which hle_nextendo_routes.c gives in Nextendo mode from its checked service profile. NULL or false: no stand-in,
-// the request fails as before. A game whose own TLS takes its roots from the store (gRPC) then needs no file from the player. The DER stays valid for the process
-void dm_ssl_set_builtin_fallback(bool (*provider)(const uint8_t **ca_der, size_t *ca_size));
+// Enumerate immutable DER entries: provider CA at index 0 (ID 1), then any title-specific IDs.
+// Without firmware, unlisted IDs use the provider CA; with firmware, explicit title enrollment overrides only the named slots.
+typedef bool (*dm_ssl_builtin_provider)(size_t index, uint32_t *id, const uint8_t **ca_der, size_t *ca_size);
+void dm_ssl_set_builtin_fallback(dm_ssl_builtin_provider provider);
 uint32_t dm_ssl_initialize(unsigned concurrency);
 uint32_t dm_ssl_finalize(void);
 uint32_t dm_ssl_context_create(void *object, unsigned version);

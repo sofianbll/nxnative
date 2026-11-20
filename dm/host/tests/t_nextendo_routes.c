@@ -14,6 +14,42 @@ static _Atomic unsigned waits;
 void dm_guest_host_wait_begin(void) { atomic_fetch_add(&waits, 1); }
 void dm_guest_host_wait_end(void) {}
 typedef struct { uint8_t length, family; uint16_t port; uint32_t address; uint8_t padding[8]; } Address;
+static int builtin_checks(bool scoped, bool firmware) {
+    typedef struct { uint32_t id, status; uint64_t size; const uint8_t *data; } Info;
+    unsigned size = 0; uint32_t ids[] = {1, 2}; void *out = NULL;
+    CHECK(dm_ssl_builtin_size(&size, ids, 2) == 0 && size > 48, "select both explicit IDs");
+    uint8_t *buf = malloc((size_t)size + 1);
+    if (!buf) return 1;
+    memset(buf, 0xa5, size + 1);
+    if (size > 48 && dm_ssl_builtin_certificates(&out, buf, size, ids, 2) == 0) {
+        Info first, second; memcpy(&first, buf, 24); memcpy(&second, buf + 24, 24);
+        CHECK(sizeof first == 24 && out == buf && buf[size] == 0xa5 && first.id == 1 && second.id == 2 &&
+              first.status == 1 && second.status == 1, "ABI records retain order, IDs and capacity");
+        const size_t next = 48 + ((first.size + 3u) & ~(size_t)3);
+        CHECK(first.size <= size - 48 && next <= size && second.size <= size - next &&
+              first.data == buf + 48 && second.data == buf + next, "DER pointers, bounds and alignment");
+        if (first.data == buf + 48 && first.size <= size - 48 && next <= size && second.data == buf + next && second.size <= size - next)
+            CHECK(scoped == (first.size != second.size || memcmp(first.data, second.data, first.size) != 0),
+                  "only the matching title receives distinct roots");
+    } else CHECK(false, "explicit entries are returned");
+    free(buf);
+    uint32_t all = UINT32_MAX;
+    CHECK(dm_ssl_builtin_size(&size, &all, 1) == 0 && size > 48, "size all stand-in roots");
+    buf = malloc(size);
+    if (!buf) return 1;
+    const unsigned entries = firmware ? 3 : scoped ? 2 : 1;
+    if (size >= (entries + 1) * 24 && dm_ssl_builtin_certificates(&out, buf, size, &all, 1) == 0) {
+        Info end; memcpy(&end, buf + entries * 24, 24);
+        CHECK(end.id == UINT32_MAX && end.status == UINT32_MAX && !end.size && !end.data, "All adds only the SDK sentinel");
+        if (firmware) {
+            Info original; memcpy(&original, buf + 48, 24);
+            CHECK(original.id == 0x409 && original.status == 2, "unassigned firmware ID and status are preserved");
+        }
+    } else CHECK(false, "All returns advertised roots plus sentinel");
+    free(buf);
+    printf("Nextendo routes: %d checks, %d failures (built-in store)\n", checks, failures);
+    return failures ? 1 : 0;
+}
 static void udp_trace_checks(void) {
     int fd = dm_net_socket(2, 2, 17);
     Address a = {16, 2, 0, htonl(INADDR_LOOPBACK), {0}}; unsigned size = sizeof a;
@@ -129,6 +165,11 @@ int main(int argc, char **argv) {
         printf("Nextendo routes: %d checks, %d failures (recovery)\n",checks,failures); return failures ? 1 : 0;
     }
     CHECK((status == 0) == (dm_nextendo_routes_count() > 0), "only a fully validated table is published");
+    if (argc == 4 && !strncmp(argv[3], "builtin-", 8)) {
+        bool firmware = !strcmp(argv[3], "builtin-firmware");
+        if (!firmware) unsetenv("DM_SYSTEM_DATA_DIR"); unsetenv("DM_SYSTEM_DIR");
+        return builtin_checks(strcmp(argv[3], "builtin-default") != 0, firmware);
+    }
     setenv("DM_NEXTENDO_ROUTES", "/unconfigured/should-not-reload.tsv", 1); CHECK(dm_nextendo_routes_initialize() == expected, "routing configuration is immutable until the next process launch");
     CHECK(dm_bcat_online_enabled() == (status == 0), "BCAT capability requires an opted-in, fully published profile");
     resolve_checks(status == 0);

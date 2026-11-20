@@ -38,7 +38,7 @@ class NextendoServicesTests(unittest.TestCase):
                 self.assertEqual(fetch.call_args.args[0].full_url, authority['caURL'])
             rows = [r.split('\t') for r in (out / 'routes.tsv').read_text().splitlines()[1:]]
             self.assertEqual([r for r in rows if r[4] == filename], [[
-                'exact', 't-4e44e7a0-lp1.lp1.t.npln.srv.nintendo.net', value['provider']['server'], '@host', filename, digest]])
+                'exact', 't-4e44e7a0-lp1.lp1.t.npln.srv.nintendo.net', value['provider']['server'], '@host', filename, digest, ZA + ':2']])
             self.assertEqual(next(r[4] for r in rows if r[1] == 'nintendo.net'), 'provider-ca.der')
             self.assertEqual(json.loads((out / 'manifest.json').read_text())['files'][filename], digest)
             self.assertEqual((out / filename).read_bytes(), dedicated)

@@ -10,7 +10,8 @@
   "serviceCAs": {
     "legends-za": {
       "caURL": "https://wiki.nextendo.network/media/certs/nextendo-pokemon-legends-za-ca.pem",
-      "caSHA256": "6391c69d6d01c3bcc39c30b261e16eab20242de4c14cfd80a4445dd304ad0722"
+      "caSHA256": "6391c69d6d01c3bcc39c30b261e16eab20242de4c14cfd80a4445dd304ad0722",
+      "builtinId": 2
     }
   },
   "base": [

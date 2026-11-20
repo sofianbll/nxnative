@@ -72,7 +72,7 @@ def rules(value, title_id, protocol=None):
     families = value.get('titleFamilies', {})
     family = protocol or families.get(title_id, 'nex')
     items = list(value['base']) + value.get('families', {}).get(family, []) + value.get('titles', {}).get(title_id, [])
-    seen, output, aliases = set(), [], {}
+    seen, output, aliases, slots = set(), [], {}, {}
     for item in items:
         kind, host = item['match'], item['host'].lower()
         if kind not in ('exact', 'suffix', 'label', 'pinned-exact') or len(host) > 253:
@@ -98,6 +98,11 @@ def rules(value, title_id, protocol=None):
         ca = value['serviceCAs'][authority] if authority is not None else value['provider']
         filename = ca['caSHA256'] + '.der' if authority is not None else 'provider-ca.der'
         tail = ['@host', filename, ca['caSHA256']] if item['tls'] else ['-', '-', '-']
+        if 'builtinId' in ca:
+            slot = ca['builtinId']
+            if authority is None or type(slot) is not int or not 2 <= slot < 0xffffffff or slots.setdefault(slot, authority) != authority:
+                raise ValueError('Invalid or conflicting built-in service CA ID')
+            tail.append(f'{title_id}:{slot}')
         output.append('\t'.join([kind, host, address] + tail))
     for address, (host, pin) in aliases.items(): output.append('\t'.join(['pinned-address', address, address, host, pin + '.der', pin]))
     if not 0 < len(output) <= 128: raise ValueError('Invalid service route count')

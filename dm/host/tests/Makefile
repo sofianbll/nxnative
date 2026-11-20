@@ -631,16 +631,16 @@ ssl-sanitize: $(B)/t_ssl_asan $(B)/t_ssl_trace_asan
 	$(PYTHON) test_ssl_transport.py $(B)/t_ssl_asan
 
 ROUTE_SOURCES = t_nextendo_routes.c t_net_write_stub.c ../hle_nextendo_routes.c ../hle_net_backend.c ../hle_nsd_backend.c ../hle_ssl_apple.m ../hle_nextendo_x509.c
-ROUTE_DEPS = ../nsd.h $(ROUTE_SOURCES) ../nextendo_routes.h ../net_socket.h ../ssl_backend.h test_nextendo_routes.py test_ssl_transport.py Makefile
+ROUTE_DEPS = ../nsd.h $(ROUTE_SOURCES) ../nextendo_routes.h ../net_socket.h ../ssl_backend.h $(GAME_H) test_nextendo_routes.py test_ssl_transport.py Makefile
 $(B)/t_nextendo_routes: $(ROUTE_DEPS) | $(B)
-	$(CLANG) -O1 -g -fobjc-arc -mmacosx-version-min=14.0 -Wall -Wextra -Werror $(PRIVATE_PKI_FLAGS) -o $@ $(ROUTE_SOURCES) $(PRIVATE_PKI_LIB) -framework Foundation -framework Security
+	$(CLANG) -O1 -g -fobjc-arc -mmacosx-version-min=14.0 -Wall -Wextra -Werror $(GINC) $(PRIVATE_PKI_FLAGS) -o $@ $(ROUTE_SOURCES) $(PRIVATE_PKI_LIB) -framework Foundation -framework Security
 $(B)/t_nextendo_routes_asan: $(ROUTE_DEPS) | $(B)
-	$(CLANG) -O1 -g -fobjc-arc -mmacosx-version-min=14.0 -Wall -Wextra -Werror $(PRIVATE_PKI_FLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $(ROUTE_SOURCES) $(PRIVATE_PKI_LIB) -framework Foundation -framework Security
+	$(CLANG) -O1 -g -fobjc-arc -mmacosx-version-min=14.0 -Wall -Wextra -Werror $(GINC) $(PRIVATE_PKI_FLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $(ROUTE_SOURCES) $(PRIVATE_PKI_LIB) -framework Foundation -framework Security
 .PHONY: nextendo-routes nextendo-routes-sanitize
 nextendo-routes: $(B)/t_nextendo_routes
-	$(PYTHON) test_nextendo_routes.py $(B)/t_nextendo_routes
+	$(PYTHON) test_nextendo_routes.py $(B)/t_nextendo_routes $(GAME)
 nextendo-routes-sanitize: $(B)/t_nextendo_routes_asan
-	$(PYTHON) test_nextendo_routes.py $(B)/t_nextendo_routes_asan
+	$(PYTHON) test_nextendo_routes.py $(B)/t_nextendo_routes_asan $(GAME)
 
 $(B)/t_nextendo_x509: t_nextendo_x509.c ../hle_nextendo_x509.c ../nextendo_x509.h | $(B)
 	$(CLANG) -O1 -g -Wall -Wextra -Werror $(PRIVATE_PKI_FLAGS) -o $@ t_nextendo_x509.c ../hle_nextendo_x509.c $(PRIVATE_PKI_LIB)

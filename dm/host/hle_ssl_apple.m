@@ -82,7 +82,7 @@ static uint64_t nextIdentifier;
 static _Atomic(dm_ssl_peer_policy_provider) peerProvider;
 static _Atomic(dm_ssl_peer_policy_provider) pinProvider;
 static _Atomic(bool (*)(const char *)) peerGuard;
-static _Atomic(bool (*)(const uint8_t **, size_t *)) builtinFallback;
+static _Atomic(dm_ssl_builtin_provider) builtinFallback;
 static void initialize_registry(void) { contexts = [NSMutableDictionary new]; connections = [NSMutableDictionary new]; }
 static NSValue *key(void *object) { return [NSValue valueWithPointer:object]; }
 static BOOL enabled(void) { return dm_net_enabled(); }
@@ -140,7 +140,7 @@ static OSStatus transport_write(SSLConnectionRef c, const void *p, size_t *n) { 
 void dm_ssl_set_peer_policy(dm_ssl_peer_policy_provider provider) { atomic_store(&peerProvider, provider); }
 void dm_ssl_set_peer_pin_policy(dm_ssl_peer_policy_provider provider) { atomic_store(&pinProvider, provider); }
 void dm_ssl_set_peer_guard(bool (*guard)(const char *)) { atomic_store(&peerGuard, guard); }
-void dm_ssl_set_builtin_fallback(bool (*provider)(const uint8_t **, size_t *)) { atomic_store(&builtinFallback, provider); }
+void dm_ssl_set_builtin_fallback(dm_ssl_builtin_provider provider) { atomic_store(&builtinFallback, provider); }
 uint32_t dm_ssl_initialize(unsigned concurrency) { return concurrency >= 1 && concurrency <= 4 ? 0 : DM_SSL_FAIL; }
 uint32_t dm_ssl_finalize(void) { @autoreleasepool {
     pthread_once(&once, initialize_registry); pthread_mutex_lock(&registry);
@@ -222,13 +222,16 @@ static BOOL der_sequence(const uint8_t *p, NSUInteger size) {   // tag 0x30, the
     NSUInteger length = 0; for (unsigned i = 0; i < n; i++) length = length << 8 | p[2 + i];
     return 2u + n + length == size;
 }
-static NSData *fallback_ca(void) {
-    bool (*provider)(const uint8_t **, size_t *) = atomic_load(&builtinFallback); const uint8_t *der = NULL; size_t size = 0;
-    return provider && provider(&der, &size) && der && size && size <= 65536 && der_sequence(der, size) ? [NSData dataWithBytes:der length:size] : nil;
+static NSDictionary *fallback_entry(dm_ssl_builtin_provider provider, size_t index) {
+    uint32_t id = 0; const uint8_t *der = NULL; size_t size = 0;
+    if (!provider || !provider(index, &id, &der, &size) || !id || id == UINT32_MAX || !der || !size ||
+        size > 65536 || !der_sequence(der, size)) return nil;
+    return @{@"id":@(id), @"status":@1u, @"data":[NSData dataWithBytes:der length:size]};
 }
-static NSArray<NSDictionary *> *builtin_certificates(void) {
+static NSArray<NSDictionary *> *builtin_certificates(bool *present) {
     const char *where = NULL; NSData *file = store_file(&where);
-    if (!file && fallback_ca()) return nil;   // select_builtin serves the stand-in and says so
+    if (present) *present = file != nil;
+    if (!file && fallback_entry(atomic_load(&builtinFallback), 0)) return nil;
     if (!file) { store_note("1 not found (looked for ssl_TrustedCerts.bdf under DM_SYSTEM_DATA_DIR and DM_SYSTEM_DIR/sysdata); places set:", (getenv("DM_SYSTEM_DATA_DIR") ? 1u : 0u) + (getenv("DM_SYSTEM_DIR") ? 1u : 0u)); return nil; }
     if (file.length < 8 || file.length > 4 * 1024 * 1024 || memcmp(file.bytes, "sslT", 4)) { store_note("2 rejected: not a CertStore file (size or magic); bytes", (unsigned)file.length); return nil; }
     uint32_t count; memcpy(&count, (const char *)file.bytes + 4, 4);
@@ -253,23 +256,29 @@ static NSArray<NSDictionary *> *builtin_certificates(void) {
 }
 static NSArray<NSDictionary *> *select_builtin(const uint32_t *ids, unsigned count, bool *all, unsigned *size) {
     *size = 0; *all = false; if (!ids || !count || count > 4096 || !enabled()) return nil;
-    NSArray *store = builtin_certificates();
+    bool present = false; NSArray *store = builtin_certificates(&present);
     for (unsigned i = 0; i < count; i++) if (ids[i] == UINT32_MAX) *all = true;
-    // No firmware store: the provider's CA stands in, under each ID asked for (an All query gets it once, as ID 1). Only when no store file exists at all:
-    // a file that is there but rejected still fails, so a broken store is never hidden
-    NSData *ca = !store && !store_file(&(const char *){NULL}) ? fallback_ca() : nil;
-    if (ca) {
-        store_note("9 none on the device: Nextendo's CA stands in for the built-in certificates, IDs asked for:", count);
-        NSMutableArray *standIn = [NSMutableArray new];
-        if (*all) [standIn addObject:@{@"id":@1u, @"status":@1u, @"data":ca, @"readable":@YES}];
-        else for (unsigned i = 0; i < count; i++) [standIn addObject:@{@"id":@(ids[i]), @"status":@1u, @"data":ca, @"readable":@YES}];
-        store = standIn;
+    // Do not hide a rejected firmware store. With a valid one, only explicit
+    // title enrollment replaces slots; unrelated firmware entries keep their IDs.
+    dm_ssl_builtin_provider provider = atomic_load(&builtinFallback);
+    NSDictionary *scoped = store ? fallback_entry(provider, 1) : nil;
+    NSDictionary *generic = !present || scoped ? fallback_entry(provider, 0) : nil;
+    if (generic) {
+        NSMutableArray *roots = [NSMutableArray arrayWithObject:generic];
+        NSMutableSet *slots = [NSMutableSet setWithObject:generic[@"id"]];
+        for (size_t i = 1; i < 128; ++i) {
+            NSDictionary *entry = fallback_entry(provider, i); if (!entry) break;
+            [roots addObject:entry]; [slots addObject:entry[@"id"]];
+        }
+        for (NSDictionary *entry in store) if (![slots containsObject:entry[@"id"]]) [roots addObject:entry];
+        store = roots;
     }
     if (!store) return nil;
     NSMutableArray *selected = [NSMutableArray new];
     if (*all) [selected addObjectsFromArray:store];
     else for (unsigned i = 0; i < count; i++) {
         NSDictionary *found = nil; for (NSDictionary *entry in store) if ([entry[@"id"] unsignedIntValue] == ids[i]) { found = entry; break; }
+        if (!found && generic && !present) found = @{@"id":@(ids[i]), @"status":@1u, @"data":generic[@"data"]};
         if (!found) return nil; [selected addObject:found];
     }
     uint64_t needed = 24 * (selected.count + (*all ? 1 : 0));
@@ -280,6 +289,28 @@ uint32_t dm_ssl_builtin_size(unsigned *out, const uint32_t *ids, unsigned count)
     if (!out || !ids) return DM_SSL_BAD_POINTER; *out = 0; bool all;
     return select_builtin(ids, count, &all, out) ? 0 : DM_SSL_FAIL;
 } }
+static void log_stand_in(NSArray<NSDictionary *> *entries) {
+    static _Atomic unsigned count;
+    if (atomic_load_explicit(&count, memory_order_relaxed) >= 16) return;
+    NSMutableString *line = nil; NSMutableSet *ids = nil;
+    for (NSDictionary *entry in entries) {
+        if (entry[@"readable"]) continue; // a firmware entry, not an enrolled Nextendo CA
+        if (!line) {
+            if (atomic_fetch_add_explicit(&count, 1, memory_order_relaxed) >= 16) return;
+            line = [NSMutableString stringWithString:@"ssl: certificate store: Nextendo built-in CA SHA-256"];
+            ids = [NSMutableSet new];
+        }
+        NSNumber *id = entry[@"id"];
+        if ([ids containsObject:id]) continue;
+        if (ids.count == 128) { [line appendString:@" ..."]; break; }
+        [ids addObject:id];
+        NSData *der = entry[@"data"]; unsigned char hash[CC_SHA256_DIGEST_LENGTH];
+        CC_SHA256(der.bytes, (CC_LONG)der.length, hash);
+        [line appendFormat:@" 0x%x=", id.unsignedIntValue];
+        for (size_t i = 0; i < sizeof hash; ++i) [line appendFormat:@"%02x", (unsigned)hash[i]];
+    }
+    if (line) fprintf(stderr, "%s\n", line.UTF8String);
+}
 uint32_t dm_ssl_builtin_certificates(void **out, uint8_t *buffer, unsigned capacity, const uint32_t *ids, unsigned count) { @autoreleasepool {
     if (!out || !buffer || !ids) return DM_SSL_BAD_POINTER; *out = NULL; bool all; unsigned size;
     NSArray *entries = select_builtin(ids, count, &all, &size); if (!entries || capacity < size) return DM_SSL_FAIL;
@@ -290,6 +321,7 @@ uint32_t dm_ssl_builtin_certificates(void **out, uint8_t *buffer, unsigned capac
         memcpy(buffer + 24 * i, &info, sizeof info); memcpy(buffer + position, der.bytes, der.length); position += (der.length + 3u) & ~(size_t)3;
     }
     if (all) { uint32_t sentinel[2] = {UINT32_MAX, UINT32_MAX}; memcpy(buffer + 24 * entries.count, sentinel, sizeof sentinel); }
+    log_stand_in(entries);
     *out = buffer; return 0;
 } }
 uint32_t dm_ssl_import_server(void *object, uint64_t *id, const void *bytes, unsigned size, int format) { @autoreleasepool {
@@ -538,7 +570,7 @@ static BOOL verify_peer(DmTlsConnection *c) {
     NSMutableArray *anchors = [NSMutableArray new]; [c.context.lock lock]; for (NSArray *list in c.context.anchors.allValues) [anchors addObjectsFromArray:list]; [c.context.lock unlock];
     // Horizon's default CertStore is context-local too. Preserve the dumped trust status;
     // removed, untrusted and revoked records remain retrievable, never default anchors.
-    for (NSDictionary *entry in builtin_certificates()) if ([entry[@"status"] unsignedIntValue] == 1 && [entry[@"readable"] boolValue]) {
+    for (NSDictionary *entry in builtin_certificates(NULL)) if ([entry[@"status"] unsignedIntValue] == 1 && [entry[@"readable"] boolValue]) {
         NSData *der = entry[@"data"]; [anchors addObjectsFromArray:parse_certificates(der.bytes, (unsigned)der.length, 2)];
     }
     if (c.policyAnchor) { NSArray *scoped = parse_certificates(c.policyAnchor.bytes, (unsigned)c.policyAnchor.length, 2); if (!scoped) { CFRelease(trust); return verify_trace(c, NO, errSecParam, "invalid-scoped-anchor", anchors_used); } [anchors addObjectsFromArray:scoped]; }

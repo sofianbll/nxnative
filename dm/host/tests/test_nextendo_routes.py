@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import socket
 import ssl
+import struct
 import subprocess
 import tempfile
 import threading
@@ -18,7 +19,9 @@ from test_ssl_transport import command
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("executable", type=Path)
-    executable = parser.parse_args().executable.resolve()
+    parser.add_argument("title", type=str.lower)
+    args = parser.parse_args()
+    executable = args.executable.resolve()
     with tempfile.TemporaryDirectory(prefix="nxnative-routes-") as folder:
         root = Path(folder)
         os.chmod(root, 0o700)
@@ -142,6 +145,27 @@ def main():
             (root/certificate).chmod(0o600); pin_configs.append((path,reject,name == 'pin-handoff'))
         total = 0
         try:
+            other_title = '0100152000022000' if args.title != '0100152000022000' else '0100f43008c44000'
+            builtin = root / 'builtin.tsv'
+            firmware = root / '0100000000000800/files'
+            firmware.mkdir(parents=True)
+            original = (root / 'ca.der').read_bytes()
+            (firmware / 'ssl_TrustedCerts.bdf').write_bytes(b'sslT' + struct.pack('<5I', 1, 0x409, 2, len(original), 16) + original)
+            for title, mode in [(args.title, 'builtin-scoped'), (other_title, 'builtin-default'), (args.title, 'builtin-firmware')]:
+                builtin.write_text(
+                    'NXNEXTENDO_ROUTES_2\n'
+                    f'exact\tapi.console.invalid\t127.0.0.1\t@host\tca.der\t{digest}\n'
+                    f'exact\tnpln.console.invalid\t127.0.0.1\t@host\tsecond.der\t{pin_digest}\t{title}:2\n')
+                builtin.chmod(0o600)
+                (root / 'second.der').write_bytes((root / 'pin.der').read_bytes())
+                (root / 'second.der').chmod(0o600)
+                result = subprocess.run([str(executable), str(builtin), '0', mode], text=True, capture_output=True,
+                                        timeout=15, env=dict(os.environ, DM_SYSTEM_DATA_DIR=str(root)))
+                if result.returncode:
+                    raise AssertionError(result.stdout + result.stderr)
+                if (f'0x2={pin_digest}' in result.stderr) != (mode != 'builtin-default') or f'0x1={digest}' not in result.stderr:
+                    raise AssertionError(f'incorrect built-in trust log\n{result.stderr}')
+                total += int(re.search(r"routes: (\d+) checks, 0 failures", result.stdout)[1])
             for path, status in cases:
                 args = [str(executable), path, str(status)]
                 if path in (str(config), str(v2)):
@@ -185,7 +209,7 @@ def main():
             if recovery.returncode: raise AssertionError(recovery.stdout + recovery.stderr)
             if not {'localhost', 'wrong.invalid', 'api.console.invalid'}.issubset(names):
                 raise AssertionError("actual TLS did not observe both configured SNI names")
-            print(f"Nextendo route policy: {len(cases)+len(pin_configs)} configurations, {total} checks, 0 failures; scoped-CA and explicitly enrolled leaf TLS verified, no user credentials")
+            print(f"Nextendo route policy: {len(cases)+len(pin_configs)+3} configurations, {total} checks, 0 failures; scoped-CA and explicitly enrolled leaf TLS verified, no user credentials")
         finally:
             stop.set()
             listener.close()

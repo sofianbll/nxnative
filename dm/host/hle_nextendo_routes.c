@@ -3,6 +3,7 @@
 #include "nextendo_routes.h"
 #include "net_socket.h"
 #include "ssl_backend.h"
+#include "game_profile.h"
 #include <Security/Security.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <arpa/inet.h>
@@ -16,11 +17,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 enum { ROUTE_MAX = 128, CONFIG_MAX = 65536, CERT_MAX = 65536, CERT_TOTAL_MAX = 1024 * 1024 };
-typedef struct { char host[254], address[INET_ADDRSTRLEN], peer[254]; unsigned match; bool pinned, address_alias; uint8_t *ca; size_t ca_size; } route;
+typedef struct { char host[254], address[INET_ADDRSTRLEN], peer[254]; unsigned match; bool pinned, address_alias, title_ca; uint32_t builtin_id; uint8_t *ca; size_t ca_size; } route;
 static route *routes;
 static size_t route_count;
 static pthread_mutex_t policy_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -112,12 +114,22 @@ static int load_policy(const char *path, route **output, size_t *count) {
         char *fields[5], *part = line; const char *kind = version2 ? strsep(&part, "\t") : "exact";
         if (!kind || !part) { status = DM_NEXTENDO_ROUTES_INVALID; break; }
         for (unsigned i = 0; i < 5; i++) { fields[i] = strsep(&part, "\t"); if (!fields[i] || !fields[i][0]) { status = DM_NEXTENDO_ROUTES_INVALID; break; } }
-        if (status || part) { status = DM_NEXTENDO_ROUTES_INVALID; break; }
+        if (status) break;
         route *entry = &entries[used]; struct in_addr ip, literal;
         bool dynamic_peer = version2 && !strcmp(fields[2], "@host");
         if (!route_pattern(kind, fields[0], entry) || (inet_pton(AF_INET, entry->host, &literal) == 1) != entry->address_alias || inet_pton(AF_INET, fields[1], &ip) != 1 || (ntohl(ip.s_addr) >> 24) == 0 || (ntohl(ip.s_addr) >> 24) >= 224 ||
             (!strcmp(fields[2], "-") ? (strcmp(fields[3], "-") || strcmp(fields[4], "-")) : (!dynamic_peer && !hostname(fields[2], entry->peer)))) { status = DM_NEXTENDO_ROUTES_INVALID; break; }
         if (dynamic_peer) strcpy(entry->peer, "@host");
+        if (part) {
+            const char *title = strsep(&part, ":");
+            if (!version2 || strcmp(kind, "exact") || !dynamic_peer || !strcmp(fields[3], "-") ||
+                strlen(title) != 16 || strspn(title, "0123456789abcdefABCDEF") != 16 ||
+                !part || !*part || part[strspn(part, "0123456789")]) { status = DM_NEXTENDO_ROUTES_INVALID; break; }
+            unsigned long id = strtoul(part, NULL, 10);
+            if (id < 2 || id >= UINT32_MAX) { status = DM_NEXTENDO_ROUTES_INVALID; break; }
+            entry->title_ca = true;
+            if (!strcasecmp(title, DM_GAME_ID)) entry->builtin_id = (uint32_t)id;
+        }
         // A leaf pin enrolls one exact logical service identity. It cannot be
         // inherited by wildcard hosts or used to rename the TLS service.
         if (entry->pinned && !entry->address_alias && (entry->match || (!dynamic_peer && strcmp(entry->host, entry->peer)))) { status = DM_NEXTENDO_ROUTES_INVALID; break; }
@@ -126,6 +138,13 @@ static int load_policy(const char *path, route **output, size_t *count) {
         for (size_t i = 0; i < used; i++) if (entries[i].match == entry->match && !strcmp(entries[i].host, entry->host)) { status = DM_NEXTENDO_ROUTES_INVALID; break; }
         if (!status) status = load_ca(directory, fields[3], fields[4], entry);
         if (!status && entry->pinned && !entry->ca_size) status = DM_NEXTENDO_ROUTES_CERTIFICATE;
+        if (!status && entry->builtin_id) for (size_t i = 0; i < used; ++i) {
+            if (entries[i].builtin_id != entry->builtin_id) continue;
+            if (entries[i].ca_size != entry->ca_size || memcmp(entries[i].ca, entry->ca, entry->ca_size))
+                status = DM_NEXTENDO_ROUTES_CERTIFICATE;
+            else entry->builtin_id = 0;
+            break;
+        }
         if (status) { free(entry->ca); entry->ca = NULL; break; }
         ca_total += entry->ca_size; if (ca_total > CERT_TOTAL_MAX) { free(entry->ca); entry->ca = NULL; status = DM_NEXTENDO_ROUTES_LIMIT; break; } used++;
     }
@@ -176,12 +195,17 @@ static bool copy_peer_policy(const char *host, char *output, size_t capacity, co
 }
 static bool peer_policy(const char *host, char *output, size_t capacity, const uint8_t **ca, size_t *size) { return copy_peer_policy(host, output, capacity, ca, size, false); }
 static bool pinned_peer_policy(const char *host, char *output, size_t capacity, const uint8_t **ca, size_t *size) { return copy_peer_policy(host, output, capacity, ca, size, true); }
-// The service's CA for the SSL service's built-in certificates when the player has no firmware store (hle_ssl_apple.m): a game whose own TLS takes its roots
-// from the store (Super Mario Bros. Wonder's gRPC) then needs only the sign-in. The profile's routes share the provider's one CA (dm/net/nextendo-services.json
-// provider.caSHA256, checked when the table loaded); an enrolled leaf of a pinned route is not a CA and is skipped
-static bool provider_ca(const uint8_t **ca, size_t *size) {
+// The generic CA remains first. Only explicitly enrolled roots for this title are
+// visible to guest TLS; native TLS still scopes each CA to its exact service.
+static bool provider_ca(size_t index, uint32_t *id, const uint8_t **ca, size_t *size) {
     if (!dm_net_nextendo_enabled() || dm_nextendo_routes_initialize() != DM_NEXTENDO_ROUTES_READY) return false;
-    for (size_t i = 0; i < route_count; i++) if (routes[i].ca_size && !routes[i].pinned) { *ca = routes[i].ca; *size = routes[i].ca_size; return true; }
+    if (!index) {
+        for (size_t i = 0; i < route_count; i++) if (routes[i].ca_size && !routes[i].pinned && !routes[i].title_ca) {
+            *id = 1; *ca = routes[i].ca; *size = routes[i].ca_size; return true;
+        }
+    } else for (size_t i = 0; i < route_count; i++) if (routes[i].builtin_id && !--index) {
+        *id = routes[i].builtin_id; *ca = routes[i].ca; *size = routes[i].ca_size; return true;
+    }
     return false;
 }
 __attribute__((constructor)) static void register_policy(void) { dm_net_set_dns_provider(resolve_host); dm_ssl_set_peer_guard(admit_peer); dm_ssl_set_peer_policy(peer_policy); dm_ssl_set_peer_pin_policy(pinned_peer_policy); dm_ssl_set_builtin_fallback(provider_ca); }
