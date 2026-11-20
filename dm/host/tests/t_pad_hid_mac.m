@@ -378,12 +378,24 @@ int main(void) { @autoreleasepool {
     pad_hid_init(&n->st, "A=1,B=2,X=13,Y=14", PAD_HID_NINTENDO); n->st.buttons = 1u << 1 | 1u << 12 | 1u << 13;
     uint64_t mapped = pad_hid_buttons(&n->st); assert(mapped == (DM_BTN_B | DM_BTN_X | DM_BTN_Y));
     r[4] = 0x30; push_report(nano, r, 49); assert(n->pro_m == mapped);
+    assert(hidpad_quit_buttons(n) == (HIDPAD_QUIT_HOME | HIDPAD_QUIT_A) && quit_state.phase == HQ_HOLDING);
+    quit_now += HQ_HOLD_S; hidpad_quit_changed(); assert(quit_state.phase == HQ_PROMPT);
+    r[3] = 0x04; r[4] = 0; push_report(nano, r, 49);
+    assert(n->pro_m == DM_BTN_A && hidpad_quit_buttons(n) == HIDPAD_QUIT_B && quit_state.phase == HQ_SETTLE);
+    r[3] = 0; push_report(nano, r, 49); assert(quit_state.phase == HQ_IDLE);
+    r[4] = 0x10; push_report(nano, r, 49);
+    quit_now += HQ_HOLD_S; hidpad_quit_changed(); assert(quit_state.phase == HQ_PROMPT);
+    r[3] = 0x08; r[4] = 0; push_report(nano, r, 49); assert(quit_state.phase == HQ_QUIT);
+    quit_state = (home_quit){0};
+    r[3] = 0; r[4] = 0x10; push_report(nano, r, 49); assert(quit_state.phase == HQ_HOLDING);
     pad_hid_init(&n->st, NULL, PAD_HID_NINTENDO);
     player = 0; hidpad_lights(n, 0); assert(nouts == 10 && outs[9][1] == JC1_SUB_LEDS && outs[9][2] == 0x01);   // player 1 once it joins
     hidpad_lights(n, 0); assert(nouts == 10);                                                                    // sent once
     player = -1;
     memset(r, 0, sizeof r); r[0] = PAD_HID_NIN_REPORT;
     push_report(nano, r, 12); assert(!n->full && nouts == 11 && outs[10][1] == JC1_SUB_DEVICE_INFO);                 // back in report 0x3F: read from it, asked again
+    assert(!hidpad_quit_buttons(n) && quit_state.phase == HQ_IDLE);   // falling back clears the last full-mode Home press
+    puts("Nintendo 0x30: Home hold and positional confirm/cancel with guest remapping: OK");
     wait_ms(300); assert(nouts == 12 && outs[11][1] == JC1_SUB_DEVICE_INFO && n->tries == 2);                    // that ask unanswered: asked again
     memset(r, 0, sizeof r); r[0] = 0x21; r[13] = 0x82; r[14] = JC1_SUB_DEVICE_INFO;
     push_report(nano, r, 49); wait_ms(100); assert(nouts == 12 + 7 && !n->steps && n->answered == n->asks);          // answered: the handshake again, lights included

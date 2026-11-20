@@ -111,7 +111,7 @@ Each item was found from a red line or a pass dump on the way through the langua
 General host changes first needed here; each applies to every game:
 
 - **Nextendo BCAT startup:** [Online sync fails before the delivery cache opens](../../../docs/reference/nextendo-bcat.md#online-sync-fails-before-the-delivery-cache-opens).
-- **Full stick reach for Nintendo-protocol HID clones on Mac:** [Pro Controller clone read as raw HID](../../../docs/reference/services.md#pro-controller-clone-read-as-raw-hid).
+- **Full stick reach and Home quit for Nintendo-protocol HID clones on Mac:** [Pro Controller clone read as raw HID](../../../docs/reference/services.md#pro-controller-clone-read-as-raw-hid).
 - **Shader extraction reuse after translation-only updates:** [Shader extraction reruns after translation-only updates](../../../docs/reference/shaders.md#shader-extraction-reruns-after-translation-only-updates).
 - **Offline pipeline archive reuse across chains:** [Offline pipeline archive rebuilt after a chain-only update](../../../docs/reference/shaders.md#offline-pipeline-archive-rebuilt-after-a-chain-only-update).
 - **Frame-state allocation at a 64 KB patch boundary** (`patch_nso.py`): [A frame step state page where the patch area starts](../../../docs/reference/rewriter.md#a-frame-step-state-page-where-the-patch-area-starts).
