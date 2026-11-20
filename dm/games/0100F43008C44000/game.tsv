@@ -45,4 +45,5 @@ mem_map_limit	on
 # the material shaders in system_resource/gfx2/shader, particle effects in ik_effectdata, UI layouts (__ArchiveShader.bnsh in .truiv) in uidata
 shader_groups	#arc/system_resource=system #arc/ik_effect=effect #arc/ik_pokemon=pokemon #arc/ui=layout /arc/=arc
 shader_note	Pokémon Legends: Z-A shaders
+shader_shadow_cascades	on
 # The packs are Oodle Mermaid streams; the shader split decodes them with the game's own OodleLZ_Decompress in the Mac host (dm/host/hle_oodle.c), which the NSP script builds for any game with Trinity packs

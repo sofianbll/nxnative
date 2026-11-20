@@ -12681,6 +12681,11 @@ static id<MTLBuffer> support_buf(void) {
     b = [g_dev newBufferWithLength:65536 options:MTLResourceStorageModeShared]; res_add(b);   // All 0 when newly created
     const int render_scale_off = 192;   // Measured MSL layout: alpha_test 0, is_bgra[8] 16, viewport_inverse 144, viewport_size 160, frag_scale_count 176, render_scale float4[73] 192 (take .x)
     for (int i = 0; i < 73; i++) *(float *)((uint8_t *)b.contents + render_scale_off + 16 * i) = 1.0f;
+    const char *cascades = DM_GAME_SHADOW_CASCADES ? getenv("DM_ZA_SHADOW_CASCADES") : NULL;
+    if (cascades && !strcmp(cascades, "1")) {
+        *(float *)((uint8_t *)b.contents + DMSH_SUPPORT_SHADOW_CASCADES_OFF) = 1.0f;
+        MLOG("Z-A: consistent shadow cascade filtering enabled");
+    }
     return b;
 }
 static uint64_t support_gpu(void) { static uint64_t gpu; if (!gpu) gpu = support_buf().gpuAddress; return gpu; }

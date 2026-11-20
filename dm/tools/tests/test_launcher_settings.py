@@ -56,6 +56,14 @@ class LauncherSettingsTests(unittest.TestCase):
                     self.assertEqual((s['kind'], s['section'], s['default']), ('toggle', 'Performance', '1'))   # Breath of the Wild's profile: present_snap on
                     self.assertIn('latency', s['note'])
 
+    def test_za_shadow_cascades_are_opt_in(self):
+        for platform in ('mac', 'ios'):
+            with self.subTest(platform=platform):
+                var = 'DM_ZA_SHADOW_CASCADES'
+                s = build('0100F43008C44000', 'nvn', platform)[var]
+                self.assertEqual((s['kind'], s['section'], s['default'], s['on'], s['off']), ('toggle', 'Game', '0', '1', '0'))
+                self.assertNotIn(var, build(WONDER, 'nvn', platform))
+
     def test_sections_keep_the_profile_defaults(self):
         botw, wonder = build(BOTW, 'nvn'), build(WONDER, 'nvn')
         self.assertEqual([e for e, s in botw.items() if s['section'] == 'Performance'], PERFORMANCE_NVN)

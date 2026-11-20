@@ -37,6 +37,10 @@ The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed ther
 
 Hades II goes up to 300 %: it renders its whole picture, the HUD and text included, at 1280x720 docked and handheld, and above 100 % it renders larger instead of being scaled up: 150 % is 1920x1080, 200 % 2560x1440, 300 % 3840x2160. Sharper on a large screen or window, at more GPU time (about 2.5 times the GPU time at 200 % on an Apple M6); on a small screen the difference is slight. [Its note](../dm/games/0100A00019DE0000/README.md#rendering) has the measurements.
 
+### Consistent shadow filtering
+
+Pokémon Legends: Z-A only, off by default. Reduces sudden changes in the softness of sun shadows as they move from one distance band to another. It does not increase shadow resolution or replace the 4K Shadows code mod.
+
 ### Console mode
 
 **Docked** renders at the Switch's TV resolution, **Handheld** at its lower handheld resolution, which is lighter on the phone and can give a higher frame rate.

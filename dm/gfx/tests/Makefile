@@ -806,6 +806,12 @@ t_zsnap: t_zsnap.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_zsnap.m -framework Metal -framework Foundation
 check_t_zsnap: t_zsnap
 	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_zsnap.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_zsnap "$$work"
+t_za_shadow_cascades: t_za_shadow_cascades.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_za_shadow_cascades.m $(MTL_T_SRC) $(FW)
+check_t_za_shadow_cascades: t_za_shadow_cascades
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_za_shadow_cascades.py --fixture "$$work/cascade.metal"; \
+	  MTL_DEBUG_LAYER=1 DM_ZA_SHADOW_CASCADES=0 ./t_za_shadow_cascades "$$work/cascade.metal" 0; \
+	  MTL_DEBUG_LAYER=1 DM_ZA_SHADOW_CASCADES=1 ./t_za_shadow_cascades "$$work/cascade.metal" $(if $(filter 0100F43008C44000,$(GAME)),1,0)
 # MUFU.SIN / COS lowered from turns through the fraction (InstEmitAmpereAlu.cs ATurnsToRadians), on the GPU against a double-precision reference
 t_mufu_turns: t_mufu_turns.m
 	clang -O1 -g -Wall -fobjc-arc -o $@ t_mufu_turns.m -framework Metal -framework Foundation

@@ -3,7 +3,7 @@
 # arithmetic (precise), warp-synchronous shared memory fences (tg_fence), 64-bit products (mul_extended), float atomic adds (float_add_msl), uniform words tested against constants, which the front end would
 # fold into switches (uniform_tests), Ampere's HMMA as simdgroup matrices (hmma_msl), first stores and shared-memory stores (first_store, shared_store_msl), threadgroup memory
 # past Metal's limit (tg_spill), one copy of the raw global memory lookup's search (raw_noinline), texture gathers with offsets (gather_offsets), border colours Metal has no sampler state for (border_emu), a pixel shader's depth snapped to
-# its position (frag_z_snap) and the 0 / -1 mask of a tested bit 0 without its compare (bit0_mask). Functions of the MSL text and the library ABI only, with no build state,
+# its position (frag_z_snap), the 0 / -1 mask of a tested bit 0 without its compare (bit0_mask), and Z-A's cascade filter (za_shadow_cascades). Functions of the MSL text and the library ABI only, with no build state,
 # so tests import them. Part of the translation chain (dmsh_chain.FILES) and of every shader's cache key (dmsh_build.py CODE_FP).
 import bisect, collections, itertools, re
 import dmsh_abi as abi, dmsh_side
@@ -12,6 +12,126 @@ import dmsh_abi as abi, dmsh_side
 # and its saturation gives 0, as Metal's precise:: functions (IEEE fmin / fmax) do on every GPU. The M4 Pro's fast ones happen to agree, an A20 Pro's do not: Super Mario Galaxy 2's
 # GX lighting takes max(0, NaN) from light directions left at zero, and the half of Mario its fill light faces came out white on the iPhone (GitHub issue 72; vk_shaders.py PRECISE)
 def precise(msl): return re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', msl)
+
+# Cascade filter adapted from rhapsodos93 and lucabravi, MonZaMac (MIT, dm/third_party/monzamac/LICENSE), commit 09c6bb43.
+# https://github.com/lucabravi/MonZaMac/blob/2306992/docs/shadow-cascades.md
+ZA_CASCADE_MSL = '''static inline float2 dm_za_uv_scale(constant float4 *m)
+{
+    if (any((as_type<uint3>(float3(m[0].w, m[1].w, m[2].w)) & 0x7fffffffu) != 0u) ||
+        (as_type<uint>(m[3].w) & 0x7fffffffu) == 0u || (as_type<uint>(m[3].w) & 0x7f800000u) == 0x7f800000u)
+        return float2(0.0f);
+    float2 s = float2(length(float3(m[0].x, m[1].x, m[2].x)), length(float3(m[0].y, m[1].y, m[2].y))) / abs(m[3].w);
+    return any((as_type<uint2>(s) & 0x7f800000u) == 0x7f800000u) || any(s <= 0.0f) ? float2(0.0f) : s;
+}
+
+static inline float2 dm_za_cascade_scale(constant float4 *m, uint rows, uint layer, float enabled, uint layers)
+{
+    if (enabled != 1.0f || layers != 3u || layer == 0u || layer > 2u || rows < (layer + 1u) * 4u)
+        return float2(1.0f);
+    float2 near_scale = dm_za_uv_scale(m), far_scale = dm_za_uv_scale(m + layer * 4u);
+    if (any(near_scale <= 0.0f) || any(far_scale <= 0.0f))
+        return float2(1.0f);
+    return min(far_scale / near_scale, float2(1.0f));
+}
+
+'''
+ZA_VALUE = re.compile(r'^(?P<indent> +)(?:float|int|uint|bool) (?P<var>_\d+) = (?P<expr>[^\n;]+);$', re.M)
+ZA_WRITE = re.compile(r'^ +(_\d+) [*+/\-]?=', re.M)
+ZA_SLOTS = tuple(f'spvDescriptorSet0.fp_t_tcb_{slot}' for slot in ('28', '38'))  # depth taps, then object-ID reads
+ZA_C3 = '(*spvDescriptorSet0.fp_c3)._m0'
+ZA_C6 = '(*spvDescriptorSet0.fp_c6)._m0'
+ZA_C25 = '(*spvDescriptorSet0.fp_c25)._m0'
+ZA_SUPPORT = '(*spvDescriptorSet0.support_buffer)'
+ZA_LOAD = re.compile(rf'select\(0\.0, ({re.escape(ZA_C3)}|{re.escape(ZA_C6)})\[(_\d+) \? (_\d+) : 0\]\[(_\d+)\], \2\)')
+
+
+def za_shadow_cascades(msl):
+    """Recognize Z-A's cascade split, matrix and PCF radius in SPIRV-Cross MSL. Only change the products with the reciprocals
+    of depth-map width and height. The adjacent ID map keeps its dimensions and its self-shadow guard."""
+    depth, ids = ZA_SLOTS
+    if not all(s in msl for s in (f'{depth}.sample(', f'{ids}.read(', ' + 2452;', 'using namespace metal;\n',
+                                   *(f'{ZA_C3}[133].{axis}' for axis in 'xyz'))):
+        return msl
+    values, written = {}, set(ZA_WRITE.findall(msl))
+    for m in ZA_VALUE.finditer(msl):
+        if m['var'] in values: written.add(m['var'])
+        values[m['var']] = m
+
+    def trace(m, name, form):
+        v = values.get(name)
+        if v and name not in written and v.start() < m.start():
+            return re.fullmatch(form, v['expr'])
+        return None
+
+    # The first word of each 64-bit load comes from a byte offset split into a vector index and component.
+    # Check the original uniform-size guard too; the new matrix loads must be bounded.
+    def byte_address(m):
+        q = ZA_LOAD.fullmatch(m['expr'])
+        if not q: return None
+        bank, valid, row, column = q.groups()
+        slot = 'x' if bank == ZA_C3 else 'w'
+        if not trace(m, valid, rf'uint\({row}\) < \({re.escape(ZA_C25)}\[0\]\.{slot} >> 4u\)'): return None
+        if not (c := trace(m, column, r'int\((_\d+)\) & 3')): return None
+        word = c[1]
+        if not (r := trace(m, row, r'int\((_\d+)\)')) or not trace(m, r[1], rf'uint\(int\(uint\(int\({word}\)\) >> uint\(2\)\)\)'): return None
+        a = trace(m, word, r'uint\(int\(uint\((_\d+)\) >> uint\(2\)\)\)')
+        return (bank, a[1]) if a else None
+
+    # Follow a depth dimension through SPIRV-Cross's scaling helper to its reciprocal.
+    dim = rf'int3\({re.escape(depth)}\.get_width\(\), {re.escape(depth)}\.get_height\(\), {re.escape(depth)}\.get_array_size\(\)\)\.([xy])'
+
+    def axis_of(m, operand):
+        r = trace(m, operand, r'1\.0 / (_\d+)')
+        f = trace(m, r[1], r'float\(uint\((_\d+)\)\)') if r else None
+        q = trace(m, f[1], rf'_\d+\((_\d+), _\d+, {re.escape(ZA_SUPPORT)}\)') if f else None
+        a = trace(m, q[1], r'(_\d+)') if q else None
+        d = trace(m, a[1], dim) if a else None
+        return d[1] if d else None
+
+    matrices, radii, products = {}, set(), {}
+    for m in values.values():
+        if m['var'] in written: continue
+        if a := byte_address(m):
+            bank, address = a
+            if bank == ZA_C3:
+                if trace(m, address, r'_\d+ \+ 2452'): radii.add(m['var'])
+            else:
+                a = trace(m, address, r'(_\d+) \+ (8|16|24|32|40|48|56)')
+                base, off = (a[1], int(a[2])) if a else (address, 0)
+                if (layer := trace(m, base, r'(_\d+) << 6')) and values[base]['indent'] == m['indent']:
+                    matrices.setdefault((base, layer[1]), {})[off] = m.end()
+        if p := re.fullmatch(r'(_\d+) \* (_\d+)', m['expr']):
+            for radius, reciprocal in ((p[1], p[2]), (p[2], p[1])):
+                if radius in radii and (axis := axis_of(m, reciprocal)):
+                    products.setdefault(radius, []).append((axis, m))
+    if len(products) != 1: return msl
+    pair, = products.values()
+    if sorted(a for a, _ in pair) != ['x', 'y']: return msl
+    first, last = (m for _, m in pair)
+    indent = first['indent']
+    if indent != last['indent'] or re.search(r'^\s*[{}]', msl[first.end():last.start()], re.M): return msl
+    layers = []
+    for (base, layer), offsets in matrices.items():
+        end = max(offsets.values())
+        if set(offsets) != set(range(0, 64, 8)) or end >= first.start(): continue
+        # The eight loads must be straight-line, and the index must still be in scope at both products.
+        if re.search(r'^\s*[{}]', msl[values[base].end():end], re.M): continue
+        if re.search(r'^ {0,%d}\}' % (len(values[base]['indent']) - 1), msl[end:first.start()], re.M): continue
+        if not trace(first, layer, r'(?:min|precise::min)\(_\d+, _\d+\)'): continue
+        layers.append(layer)
+    if len(layers) != 1: return msl
+    layer, = layers
+    # In this shader family every depth tap carries the same cascade as a bias operand of TEX.
+    taps = re.findall(rf'{re.escape(depth)}\.sample\([^\n]+?bias\((_\d+)\)', msl[last.end():])
+    if len(taps) != 16 or len(set(taps)) != 1 or not trace(first, taps[0], rf'float\({layer}\)'): return msl
+    out = msl
+    for axis, m in reversed(pair):
+        out = out[:m.end() - 1] + f' * dm_za_scale.{axis}' + out[m.end() - 1:]
+    call = (f'{indent}float2 dm_za_scale = dm_za_cascade_scale({ZA_C6}, {ZA_C25}[0].w >> 4u, '
+            f'uint({layer}), {ZA_SUPPORT}._m5[0].y, {depth}.get_array_size());\n')
+    out = out[:first.start()] + call + out[first.start():]
+    return out.replace('using namespace metal;\n', 'using namespace metal;\n\n' + ZA_CASCADE_MSL, 1)
+
 
 PER_VERTEX_BASE = 64   # the translator's Declarations.PerVertexLocationBase: dm_pv<L>_<v> is at user(locn<64 + 3L + v>), past every attribute's own location
 PER_VERTEX_IN = re.compile(r'\n    float4 dm_pv(\d+)_([012]) \[\[user\(locn(\d+)\)(?:, flat)?\]\];')
