@@ -32,8 +32,8 @@ bcat-fixtures: $(B)/t_bcat_store $(B)/t_bcat_sdk $(B)/t_bcat_fs
 	$(PYTHON) test_bcat_zip.py $(abspath $(B))/t_bcat_store
 	$(B)/t_bcat_sdk
 	$(B)/t_bcat_fs
-bcat-launch:
-	DM_OPENSSL_ROOT="$(DM_OPENSSL_ROOT)" $(PYTHON) test_bcat_launch.py
+bcat-launch: $(GAME_H)
+	DM_OPENSSL_ROOT="$(DM_OPENSSL_ROOT)" DM_BCAT_TEST_GAME="$(GAME)" $(PYTHON) test_bcat_launch.py
 bcat-tools:
 	DM_OPENSSL_ROOT="$(DM_OPENSSL_ROOT)" $(PYTHON) -m unittest discover -s ../../tools/tests -p test_nextendo_bcat.py
 bcat: bcat-fixtures bcat-launch bcat-tools

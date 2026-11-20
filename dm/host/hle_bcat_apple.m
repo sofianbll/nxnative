@@ -65,12 +65,15 @@ static BOOL safeDirectory(NSString *path, BOOL create) {
     }
     return YES;
 }
-static NSData *boundedRead(NSString *path, NSUInteger max) {
-    int fd=open(path.fileSystemRepresentation,O_RDONLY|O_CLOEXEC|O_NOFOLLOW); if(fd<0)return nil;
-    struct stat s; if(fstat(fd,&s)||!S_ISREG(s.st_mode)||s.st_size<0||(uint64_t)s.st_size>max){close(fd);return nil;}
+static NSData *readRegular(NSString *path, NSUInteger max, BOOL trustedOwner) {
+    if(!path)return nil;
+    int fd=open(path.fileSystemRepresentation,O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK); if(fd<0)return nil;
+    struct stat s; if(fstat(fd,&s)||!S_ISREG(s.st_mode)||s.st_size<0||(uint64_t)s.st_size>max||
+                     (trustedOwner&&((s.st_uid!=geteuid()&&s.st_uid!=0)||(s.st_mode&022)))){close(fd);return nil;}
     NSMutableData *d=[NSMutableData dataWithLength:(NSUInteger)s.st_size]; size_t done=0;
     while(done<d.length){ssize_t n=read(fd,(char *)d.mutableBytes+done,d.length-done);if(n<=0){close(fd);return nil;}done+=(size_t)n;}close(fd);return d;
 }
+static NSData *boundedRead(NSString *path, NSUInteger max){return readRegular(path,max,NO);}
 static BOOL atomicWrite(NSData *data, NSString *path) {
     if (!data || !safeDirectory(path.stringByDeletingLastPathComponent,YES)) return NO;
     NSString *tmp=[path.stringByDeletingLastPathComponent stringByAppendingPathComponent:[@".incoming-" stringByAppendingString:NSUUID.UUID.UUIDString]];
@@ -155,7 +158,7 @@ static NSDictionary *catalog(NSData *data, NSString *title, NSString *version, B
     if(![r isKindOfClass:NSHTTPURLResponse.class]){self.failed=YES;completion(NSURLSessionResponseCancel);return;}
     NSHTTPURLResponse *h=(id)r;self.status=h.statusCode;
     if(r.expectedContentLength>(int64_t)self.limit||![r.URL isEqual:t.originalRequest.URL]){self.failed=YES;completion(NSURLSessionResponseCancel);return;}
-    id tag=h.allHeaderFields[@"Etag"]?:h.allHeaderFields[@"ETag"];if(validETag(tag))self.etag=tag;
+    NSString *tag=[h valueForHTTPHeaderField:@"ETag"];if(validETag(tag))self.etag=tag;
     completion(NSURLSessionResponseAllow);
 }
 -(void)URLSession:(NSURLSession *)s dataTask:(NSURLSessionDataTask *)t didReceiveData:(NSData *)d {if(d.length>self.limit-self.bytes.length){self.failed=YES;[t cancel];}else[self.bytes appendData:d];}
@@ -197,19 +200,34 @@ static BOOL fileFormat(NSString *path, NSData *data){
     return NO;
 }
 static BOOL scheduleName(NSString *path){return safePath(path)&&[path componentsSeparatedByString:@"/"].count==2&&[@[@"coopdata",@"vsdata",@"fesdata"] containsObject:[path componentsSeparatedByString:@"/"][0]]&&[@[@"byaml",@"bfres",@"szs"] containsObject:path.pathExtension];}
+static BOOL lowerHex(id value, NSUInteger length) {
+    return [value isKindOfClass:NSString.class] && [value length]==length &&
+        [value rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet]].location==NSNotFound;
+}
+static BOOL deliveryName(NSString *name) {
+    return name.length<=31 && safePath(name) && ![name containsString:@"/"] &&
+        [name rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-"] invertedSet]].location==NSNotFound;
+}
+static BOOL deliveryPathName(NSString *path) {
+    NSArray<NSString *> *parts=[path componentsSeparatedByString:@"/"];
+    return parts.count==2 && deliveryName(parts[0]) && deliveryName(parts[1]);
+}
 /* ZIP central directory is authoritative only after matching every local header.
  * No symlinks, extras, duplicate/case-alias paths, ZIP64, encryption or overlap.
  * Deflate output and CRC are checked before any file becomes visible. */
-static NSDictionary<NSString *,NSData *> *unzip(NSData *zip, NSString **error){
-    const uint8_t *b=zip.bytes;NSUInteger n=zip.length;if(n<22||n>zipLimit){fail(error,@"Calendar archive exceeds its bounds");return nil;}
+static NSDictionary<NSString *,NSData *> *unzipPackage(NSData *zip, BOOL recipe, NSString **error){
+    const uint8_t *b=zip.bytes;NSUInteger n=zip.length;if(n<22||n>zipLimit){fail(error,@"BCAT archive exceeds its bounds");return nil;}
     NSUInteger end=NSNotFound;for(NSUInteger p=n-22;;p--){if(u32(b+p)==0x06054b50&&p+22+u16(b+p+20)==n){end=p;break;}if(!p||n-p>65557)break;}
-    if(end==NSNotFound||u16(b+end+4)||u16(b+end+6)||u16(b+end+8)!=u16(b+end+10)){fail(error,@"Invalid calendar ZIP directory");return nil;}
-    unsigned count=u16(b+end+10);NSUInteger central=u32(b+end+16),centralSize=u32(b+end+12);if(!count||count>64||central>end||centralSize!=end-central){fail(error,@"Invalid calendar ZIP bounds");return nil;}
+    if(end==NSNotFound||u16(b+end+4)||u16(b+end+6)||u16(b+end+8)!=u16(b+end+10)){fail(error,@"Invalid BCAT ZIP directory");return nil;}
+    unsigned count=u16(b+end+10);NSUInteger central=u32(b+end+16),centralSize=u32(b+end+12);if(!count||count>(recipe?64:DM_BCAT_MAX_FILES)||central>end||centralSize!=end-central){fail(error,@"Invalid BCAT ZIP bounds");return nil;}
     NSMutableDictionary *files=[NSMutableDictionary new];NSMutableSet *names=[NSMutableSet new];NSMutableArray *ranges=[NSMutableArray new];NSUInteger at=central,total=0;
+    NSMutableDictionary<NSString *,NSString *> *directories=[NSMutableDictionary new];
     for(unsigned i=0;i<count;i++){
         if(at+46>end||u32(b+at)!=0x02014b50)goto invalid;unsigned flags=u16(b+at+8),method=u16(b+at+10),nameLen=u16(b+at+28),extra=u16(b+at+30),comment=u16(b+at+32);uint32_t packed=u32(b+at+20),size=u32(b+at+24),crc=u32(b+at+16);NSUInteger local=u32(b+at+42);
-        if(flags&~(8|0x800)||(method!=0&&method!=8)||u16(b+at+34)||!nameLen||nameLen>240||at+46+nameLen+extra+comment>end||size>8*1024*1024||size>expandedLimit-total||!size||(((u32(b+at+38)>>16)&0170000)&&((u32(b+at+38)>>16)&0170000)!=0100000))goto invalid;
-        NSString *name=[[NSString alloc]initWithBytes:b+at+46 length:nameLen encoding:NSUTF8StringEncoding];if(!scheduleName(name)||[names containsObject:name.lowercaseString])goto invalid;[names addObject:name.lowercaseString];
+        if(flags&~(8|0x800)||(method!=0&&method!=8)||u16(b+at+34)||!nameLen||nameLen>240||at+46+nameLen+extra+comment>end||size>DM_BCAT_MAX_FILE_SIZE||size>expandedLimit-total||(recipe&&!size)||(u32(b+at+38)&0x10)||(((u32(b+at+38)>>16)&0170000)&&((u32(b+at+38)>>16)&0170000)!=0100000))goto invalid;
+        NSString *name=[[NSString alloc]initWithBytes:b+at+46 length:nameLen encoding:NSUTF8StringEncoding];if(!(recipe?scheduleName(name):deliveryPathName(name))||[names containsObject:name.lowercaseString])goto invalid;[names addObject:name.lowercaseString];
+        NSString *dir=name.stringByDeletingLastPathComponent,*key=dir.lowercaseString;
+        if(directories[key]&&![directories[key] isEqual:dir])goto invalid;directories[key]=dir;
         if(local+30>central||u32(b+local)!=0x04034b50||u16(b+local+6)!=flags||u16(b+local+8)!=method||u16(b+local+26)!=nameLen)goto invalid;
         NSUInteger start=local+30+nameLen+u16(b+local+28);if(start>central||packed>central-start||memcmp(b+local+30,b+at+46,nameLen))goto invalid;
         if(!(flags&8)&&(u32(b+local+14)!=crc||u32(b+local+18)!=packed||u32(b+local+22)!=size))goto invalid;
@@ -217,14 +235,15 @@ static NSDictionary<NSString *,NSData *> *unzip(NSData *zip, NSString **error){
         if(flags&8){BOOL signedDD=stop+4<=central&&u32(b+stop)==0x08074b50;NSUInteger dd=stop+(signedDD?4:0);if(dd+12>central||u32(b+dd)!=crc||u32(b+dd+4)!=packed||u32(b+dd+8)!=size)goto invalid;stop=dd+12;}
         for(NSValue *v in ranges){NSRange r=v.rangeValue;if(local<NSMaxRange(r)&&r.location<stop)goto invalid;}[ranges addObject:[NSValue valueWithRange:NSMakeRange(local,stop-local)]];
         NSMutableData *data=[NSMutableData dataWithLength:size];
-        if(method==0){if(packed!=size)goto invalid;memcpy(data.mutableBytes,b+start,size);}else{z_stream z={0};z.next_in=(Bytef *)b+start;z.avail_in=packed;z.next_out=data.mutableBytes;z.avail_out=size;if(inflateInit2(&z,-MAX_WBITS)!=Z_OK)goto invalid;int result=inflate(&z,Z_FINISH);BOOL ok=result==Z_STREAM_END&&z.total_out==size&&z.total_in==packed;inflateEnd(&z);if(!ok)goto invalid;}
-        if(crc32(0,data.bytes,(uInt)data.length)!=crc||!fileFormat(name,data))goto invalid;files[name]=data;total+=size;at+=46+nameLen+extra+comment;
+        if(method==0){if(packed!=size)goto invalid;if(size)memcpy(data.mutableBytes,b+start,size);}else{uint8_t empty;z_stream z={0};z.next_in=(Bytef *)b+start;z.avail_in=packed;z.next_out=size?data.mutableBytes:&empty;z.avail_out=size?:1;if(inflateInit2(&z,-MAX_WBITS)!=Z_OK)goto invalid;int result=inflate(&z,Z_FINISH);BOOL ok=result==Z_STREAM_END&&z.total_out==size&&z.total_in==packed;inflateEnd(&z);if(!ok)goto invalid;}
+        if(crc32(0,data.bytes,(uInt)data.length)!=crc||(recipe&&!fileFormat(name,data)))goto invalid;files[name]=data;total+=size;at+=46+nameLen+extra+comment;
     }
     if(at!=end)goto invalid;
-    for(NSString *required in @[@"coopdata/CoopSetting.byaml",@"vsdata/VSSetting_0.byaml",@"vsdata/VSSetting_1.byaml",@"fesdata/Festival.byaml",@"fesdata/HapTexture.bfres",@"fesdata/IconTexture.bfres",@"fesdata/PanelTexture.bfres"])if(!files[required])goto invalid;
+    if(recipe)for(NSString *required in @[@"coopdata/CoopSetting.byaml",@"vsdata/VSSetting_0.byaml",@"vsdata/VSSetting_1.byaml",@"fesdata/Festival.byaml",@"fesdata/HapTexture.bfres",@"fesdata/IconTexture.bfres",@"fesdata/PanelTexture.bfres"])if(!files[required])goto invalid;
     return files;
-invalid:fail(error,@"Calendar ZIP failed path, bounds, format or integrity validation");return nil;
+invalid:fail(error,@"BCAT ZIP failed path, bounds, format or integrity validation");return nil;
 }
+static NSDictionary<NSString *,NSData *> *unzip(NSData *zip, NSString **error){return unzipPackage(zip,YES,error);}
 
 static NSDictionary *snapshot(NSString *root,NSString *title,NSString *version){
     if(!safeDirectory(root,NO))return nil;NSDictionary *m=json(boundedRead([root stringByAppendingPathComponent:@"manifest.json"],1048576));
@@ -316,7 +335,111 @@ static char overlayPath[1024],deliveryPath[1024];static pthread_once_t startOnce
 static pthread_mutex_t refreshLock=PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t startupLock=PTHREAD_MUTEX_INITIALIZER;static BOOL startupAccepted;
 static NSString *startModules,*startTitle,*activeVersion,*activeCache,*activeRoot,*latestRoot;
-static BOOL startOnline,refreshRunning;static DmBcatRefresh *activeRefresh;static NSTimeInterval lastRefresh;
+static BOOL startOnline,refreshRunning,genericDelivery;static DmBcatRefresh *activeRefresh;static NSTimeInterval lastRefresh;
+
+static NSString *supportDirectory(void) {
+    // iOS's OS-provided home may pass through /var; reject symlinks below it.
+    char *home=realpath(NSHomeDirectory().fileSystemRepresentation,NULL);if(!home)return nil;
+    NSString *support=[@(home) stringByAppendingPathComponent:@"Library/Application Support/nxnative"];free(home);
+    return support;
+}
+
+static NSDictionary *deliveryProfile(void) {
+    const char *routes=getenv("DM_NEXTENDO_ROUTES"),*mode=getenv("DM_NETWORK");
+    if(!mode||strcmp(mode,"nextendo")||!routes||routes[0]!='/'||!lowerHex(startTitle,16))return nil;
+    NSString *path=[[@(routes) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"manifest.json"];
+    NSDictionary *profile=json(readRegular(path,65536,YES));
+    return integer(profile[@"formatVersion"])&&[profile[@"formatVersion"] isEqual:@1]&&
+        [profile[@"titleID"] isEqual:startTitle]&&profile[@"bcat"]==(__bridge id)kCFBooleanTrue?profile:nil;
+}
+
+static NSString *currentDelivery(NSString *cache, NSDictionary **manifest, uint64_t *bytes) {
+    NSDictionary *m=json(boundedRead([cache stringByAppendingPathComponent:@"current.json"],131072));
+    NSString *name=m[@"snapshot"];NSDictionary *hashes=m[@"files"];
+    if(![name isKindOfClass:NSString.class]||![[NSUUID alloc] initWithUUIDString:name]||
+       !lowerHex(m[@"archiveSHA256"],64)||![hashes isKindOfClass:NSDictionary.class]||!hashes.count||hashes.count>DM_BCAT_MAX_FILES)return nil;
+    NSString *root=[cache stringByAppendingPathComponent:name];
+    if(!safeDirectory(root,NO))return nil;
+    NSUInteger count=0,dirs=0;uint64_t length=0;
+    NSDirectoryEnumerator *it=[NSFileManager.defaultManager enumeratorAtPath:root];
+    for(NSString *rel in it){@autoreleasepool{
+        NSString *path=[root stringByAppendingPathComponent:rel];struct stat st;
+        if(lstat(path.fileSystemRepresentation,&st))return nil;
+        if(S_ISDIR(st.st_mode)){if(!deliveryName(rel)||++dirs>hashes.count)return nil;continue;}
+        if(!S_ISREG(st.st_mode)||!deliveryPathName(rel)||!hashes[rel]||++count>hashes.count)return nil;
+        NSData *data=boundedRead(path,MIN(DM_BCAT_MAX_FILE_SIZE,expandedLimit-length));
+        if(!data||![digest(data) isEqual:hashes[rel]])return nil;length+=data.length;
+    }}
+    if(count!=hashes.count)return nil;
+    *manifest=m;*bytes=length;return root;
+}
+
+static NSString *publishDelivery(NSString *cache, NSString *pointer, NSDictionary<NSString *,NSData *> *files, NSString *sha, NSString *etag) {
+    // Publish only the pointer. An already running guest can still open files
+    // in the previous generation by path, including through its bcat: mount.
+    // shortcut: keep old generations, prune only once live mounts can be tracked.
+    NSString *name=NSUUID.UUID.UUIDString,*root=[cache stringByAppendingPathComponent:name];
+    if(!safeDirectory(root,YES))return nil;
+    NSMutableDictionary *hashes=[NSMutableDictionary new];
+    for(NSString *path in files){
+        if(monotonicTime()>=launchDeadline||!atomicWrite(files[path],[root stringByAppendingPathComponent:path]))break;
+        hashes[path]=digest(files[path]);
+    }
+    NSMutableDictionary *m=[@{@"snapshot":name,@"archiveSHA256":sha,@"files":hashes} mutableCopy];
+    if(etag)m[@"etag"]=etag;
+    if(hashes.count==files.count&&monotonicTime()<launchDeadline&&atomicWrite(jsonData(m),pointer))return root;
+    [NSFileManager.defaultManager removeItemAtPath:root error:nil];return nil;
+}
+
+static void selectDelivery(NSDictionary *profile) {
+    launchDeadline=monotonicTime()+12*NSEC_PER_SEC;
+    NSString *cache=[[supportDirectory() stringByAppendingPathComponent:startTitle.uppercaseString] stringByAppendingPathComponent:@"bcat-nextendo"];
+    NSDictionary *old=nil;NSString *root=nil;uint64_t bytes=0;NSInteger status=0;NSUInteger count=0;BOOL fresh=NO;
+    if(safeDirectory(cache,YES)){
+        int dir=open(cache.fileSystemRepresentation,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+        struct stat st;
+        if(dir>=0&&!fstat(dir,&st)&&st.st_uid==geteuid()&&((st.st_mode&0777)==0700||!fchmod(dir,0700))){
+            int lock=openat(dir,".update.lock",O_RDWR|O_CREAT|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK,0600);
+            BOOL updating=lock>=0&&!fstat(lock,&st)&&S_ISREG(st.st_mode)&&st.st_uid==geteuid()&&!flock(lock,LOCK_EX|LOCK_NB);
+            root=currentDelivery(cache,&old,&bytes);count=[old[@"files"] count];
+            if(updating){
+                NSString *etag=nil;
+                NSData *zip=download([provider stringByAppendingFormat:@"/api/bcat/%@",startTitle],zipLimit,old[@"etag"],&status,&etag);
+                NSString *fallback=profile[@"bcatFallback"];
+                if(zip&&(status==204||status==404)&&lowerHex(fallback,16)&&![startTitle isEqual:fallback]){
+                    zip=download([provider stringByAppendingFormat:@"/api/bcat/%@",fallback],zipLimit,nil,&status,NULL);
+                    etag=nil; // a validator for the fallback URL does not apply to the primary
+                }
+                if(zip&&status==200){
+                    NSString *sha=digest(zip),*pointer=[cache stringByAppendingPathComponent:@"current.json"];
+                    if([sha isEqual:old[@"archiveSHA256"]]){
+                        if(etag?![etag isEqual:old[@"etag"]]:old[@"etag"]!=nil){
+                            NSMutableDictionary *m=[old mutableCopy];m[@"etag"]=etag;atomicWrite(jsonData(m),pointer);
+                        }
+                    }else{
+                        NSDictionary<NSString *,NSData *> *files=unzipPackage(zip,NO,NULL);
+                        NSString *installed=files?publishDelivery(cache,pointer,files,sha,etag):nil;
+                        if(installed){
+                            root=installed;count=files.count;fresh=YES;bytes=0;
+                            for(NSData *data in files.objectEnumerator)bytes+=data.length;
+                        }
+                    }
+                }
+            }
+            if(lock>=0)close(lock);
+        }
+        if(dir>=0)close(dir);
+    }
+    launchDeadline=0;
+    if(root&&strlcpy(deliveryPath,root.fileSystemRepresentation,sizeof deliveryPath)<sizeof deliveryPath){
+        DmBcatRefresh *job=[DmBcatRefresh new];job.status=9;job.bytes=bytes;
+        pthread_mutex_lock(&refreshLock);activeRefresh=job;pthread_mutex_unlock(&refreshLock);
+    }else{deliveryPath[0]=0;count=0;}
+    genericDelivery=YES;
+    fprintf(stderr,"bcat nextendo title=%s http=%ld files=%zu served=%s\n",startTitle.uppercaseString.UTF8String,(long)status,(size_t)count,
+            !deliveryPath[0]?"none":fresh?"fresh":"cache");
+}
+
 static NSString *refreshSnapshot(NSString **error){
     if(!safeDirectory(activeCache,YES)){fail(error,@"Unsafe calendar cache directory");return nil;}
     NSInteger status=0;NSData *envelope=download(catalogURL,1048576,nil,&status,NULL);
@@ -368,24 +491,23 @@ static void selectAtLaunch(NSString *seed){
 static void start(void){@autoreleasepool{
     // Valid local data remains useful without online services. Only refresh and
     // synchronization requests depend on the network preference.
-    if(!dm_bcat_supported(startTitle.UTF8String))return;
-#ifndef DM_OPENSSL_X509
-    return; // no signature verifier => unavailable, without any HTTP request
+    if(dm_bcat_supported(startTitle.UTF8String)){
+        const char *override=getenv("DM_NEXTENDO_BCAT_DIR");
+        NSString *seed=override?@(override):[startModules stringByAppendingPathComponent:@"bcat"];
+        NSDictionary *setup=safeDirectory(seed,NO)?json(boundedRead([seed stringByAppendingPathComponent:@"setup.json"],4096)):nil;
+        NSString *bundleVersion=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+        if(integer(setup[@"formatVersion"])&&[setup[@"formatVersion"] isEqual:@1]&&[setup[@"titleID"] isEqual:startTitle]&&
+           [setup[@"version"] isEqual:@"5.5.2"]&&(!bundleVersion||[bundleVersion isEqual:setup[@"version"]])){
+#ifdef DM_OPENSSL_X509
+            NSString *support=supportDirectory();if(!support)return;
+            activeVersion=setup[@"version"];activeCache=[[[support stringByAppendingPathComponent:@"BCAT"] stringByAppendingPathComponent:startTitle] stringByAppendingPathComponent:activeVersion];
+            selectAtLaunch(seed);
 #endif
-    const char *override=getenv("DM_NEXTENDO_BCAT_DIR");
-    NSString *seed=override?[NSString stringWithUTF8String:override]:[startModules stringByAppendingPathComponent:@"bcat"];
-    if(!safeDirectory(seed,NO))return; // absent/unsafe recipe => no network request
-    NSDictionary *setup=json(boundedRead([seed stringByAppendingPathComponent:@"setup.json"],4096));NSString *version=setup[@"version"];
-    if(!integer(setup[@"formatVersion"])||[setup[@"formatVersion"] integerValue]!=1||![setup[@"titleID"] isEqual:startTitle]||![version isKindOfClass:NSString.class]||![version isEqual:@"5.5.2"])return;
-    NSString *bundleVersion=[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
-    if(bundleVersion&&![bundleVersion isEqual:version])return;
-    // iOS returns container paths through /var, a system symlink. Canonicalize
-    // only the OS-provided home root, then reject symlinks in our own cache tree.
-    // This is ordinary private-container access, not an alternate permission path.
-    char *home=realpath(NSHomeDirectory().fileSystemRepresentation,NULL);if(!home)return;
-    NSString *support=[[NSString stringWithUTF8String:home] stringByAppendingPathComponent:@"Library/Application Support"];free(home);
-    activeVersion=version;activeCache=[[[support stringByAppendingPathComponent:@"nxnative/BCAT"] stringByAppendingPathComponent:startTitle] stringByAppendingPathComponent:version];
-    selectAtLaunch(seed);
+            return; // a configured recipe must not bypass its signature verifier
+        }
+    }
+    NSDictionary *profile=startOnline?deliveryProfile():nil;
+    if(profile)selectDelivery(profile);
 }}
 void dm_bcat_start(const char *modules,const char *title,int online){
     // Oodle's helper modes can enter guest_main only to expose a decoder; they
@@ -407,11 +529,12 @@ void dm_bcat_pre_guest_start(const char *modules,const char *title){
 const char *dm_bcat_overlay(void){return overlayPath[0]?overlayPath:NULL;}
 const char *dm_bcat_delivery(void){return deliveryPath[0]?deliveryPath:NULL;}
 int dm_bcat_copy_delivery(char *out,size_t size){@autoreleasepool{
+    if(genericDelivery)return deliveryPath[0]&&out&&size&&strlcpy(out,deliveryPath,size)<size;
     pthread_mutex_lock(&refreshLock);NSString *root=latestRoot;pthread_mutex_unlock(&refreshLock);
     if(!root||!out||!size)return 0;NSString *path=[[root stringByAppendingPathComponent:@"files"] stringByAppendingPathComponent:@"DebugUnderPilot/bcat"];
     return strlcpy(out,path.fileSystemRepresentation,size)<size;
 }}
-int dm_bcat_request_sync(void){if(!startOnline||!activeVersion)return 0;refresh();return 1;}
+int dm_bcat_request_sync(void){if(genericDelivery)return deliveryPath[0]!=0;if(!startOnline||!activeVersion)return 0;refresh();return 1;}
 static int refreshStatus(DmBcatRefresh *job,unsigned *result,uint64_t *downloaded){int status=job?(int)job.status:0;if(result)*result=job?job.result:1;if(downloaded)*downloaded=job?job.bytes:0;return status;}
 int dm_bcat_sync_status(unsigned *result,uint64_t *downloaded){pthread_mutex_lock(&refreshLock);int status=refreshStatus(activeRefresh,result,downloaded);pthread_mutex_unlock(&refreshLock);return status;}
 void *dm_bcat_sync_observe(void){@autoreleasepool{

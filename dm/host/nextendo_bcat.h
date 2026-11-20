@@ -2,7 +2,8 @@
 #define DM_NEXTENDO_BCAT_H
 #include <stddef.h>
 #include <stdint.h>
-/* Public calendar data only. No account credential is required or accepted. */
+/* Public delivery data only. No account credential is required or accepted. */
+enum { DM_BCAT_MAX_FILES = 512, DM_BCAT_MAX_FILE_SIZE = 8 * 1024 * 1024 };
 int dm_bcat_supported(const char *title);
 /* Build helper: a verified catalog and complete immutable snapshot are required. */
 int dm_bcat_prepare(const char *title, const char *version, const char *catalog,
@@ -11,10 +12,11 @@ int dm_bcat_validate(const char *title, const char *version, const char *directo
 /* Called from the pre-guest boot thread, never from a UI/render callback.
  * Online launches check before selecting the immutable RomFS overlay, sharing
  * a 12-second network budget. Offline/errors retain the last validated copy.
- * Later guest synchronization refreshes delivery opens only, never live RomFS. */
+ * Later guest synchronization refreshes delivery opens only for a calendar
+ * recipe, never live RomFS; generic packages are served as selected at launch. */
 void dm_bcat_start(const char *module_directory, const char *title, int online);
-/* Optional online provider absent => offline. A valid local recipe is also
- * required before any catalog/archive request can occur. */
+/* Optional online provider absent => offline. The local recipe or the
+ * title's service manifest must opt in before any archive request. */
 void dm_bcat_pre_guest_start(const char *module_directory, const char *title);
 /* A provider may override the weak offline default after checking its own
  * explicit network preference and configured, valid service policy. */

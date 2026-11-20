@@ -127,6 +127,14 @@ def prepare(repository, title_id, destination, protocol=None, ca=None):
                 'identity': value.get('identities', {}).get(title_id.lower(), {'account':'pid','friends':'pid'}),
                 'routeCount': len(text.splitlines()) - 1,
                 'files': {name: hashlib.sha256(data).hexdigest() for name, data in files.items()}}
+    delivery = value.get('delivery', {})
+    if delivery.get(title_id.lower(), {}).get('bcat') is True:
+        manifest['bcat'] = True
+        fallback = delivery[title_id.lower()].get('bcatFallback')
+        if fallback is not None:
+            if not re.fullmatch('[0-9a-f]{16}', fallback) or fallback == title_id.lower() or delivery.get(fallback, {}).get('bcat') is not True:
+                raise ValueError('Invalid BCAT fallback title')
+            manifest['bcatFallback'] = fallback
     files['manifest.json'] = (json.dumps(manifest, sort_keys=True) + '\n').encode()
     destination = Path(destination)
     if destination.is_symlink(): raise ValueError('The service profile must not be a symbolic link')

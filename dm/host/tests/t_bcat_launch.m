@@ -20,6 +20,13 @@ static unsigned requests,catalogRequests,archiveRequests,conditionals;
         if([fixtureMode isEqual:@"timeout"])[NSThread sleepForTimeInterval:4];
         if([fixtureMode isEqual:@"error"]){[self.client URLProtocol:self didFailWithError:[NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCannotConnectToHost userInfo:nil]];return;}
         file=[fixtureMode isEqual:@"invalid"]?@"invalid.json":@"catalog.json";
+    }else if([path isEqual:@"/api/bcat/0100f43008c44000"]){
+        @synchronized(DmBcatFixtureProtocol.class){archiveRequests++;if([[self.request valueForHTTPHeaderField:@"If-None-Match"] isEqual:@"\"delivery-v1\""])conditionals++;}
+        if([fixtureMode isEqual:@"delivery-304"])status=304;
+        else if([fixtureMode hasPrefix:@"delivery-bad"])file=@"delivery-bad.zip";
+        else if([fixtureMode isEqual:@"delivery-updated"])file=@"delivery-updated.zip";
+        else file=@"delivery.zip";
+        if(![fixtureMode isEqual:@"delivery-noetag"])headers=@{@"ETag":[fixtureMode isEqual:@"delivery-updated"]?@"\"delivery-v2\"":@"\"delivery-v1\""};
     }else if([path isEqual:@"/api/bcat/0100f8f0000a2000"]){
         @synchronized(DmBcatFixtureProtocol.class){archiveRequests++;if([self.request valueForHTTPHeaderField:@"If-None-Match"])conditionals++;}
         if([fixtureMode isEqual:@"timeout"])return;
@@ -48,15 +55,32 @@ static unsigned requests,catalogRequests,archiveRequests,conditionals;
 #endif
 // Exercise public startup without reading/writing the developer's real cache.
 // Only this fixture substitutes the OS-supplied private home directory.
-static NSString *fixtureHome(void){return [fixtureRoot stringByAppendingPathComponent:[@"home-" stringByAppendingString:fixtureMode]];}
+static NSString *fixtureHome(void){
+    NSString *name=[fixtureMode hasSuffix:@"-empty"]?@"home-delivery-empty":[fixtureMode hasPrefix:@"delivery-"]?@"home-delivery": [@"home-" stringByAppendingString:fixtureMode];
+    return [fixtureRoot stringByAppendingPathComponent:name];
+}
 #define NSHomeDirectory fixtureHome
 #import DM_BCAT_RUNTIME_INCLUDE
 #undef NSHomeDirectory
+int check_delivery_sdk(const char *name);
 
 int main(int argc,const char **argv){@autoreleasepool{
     if(argc!=4)return 2;fixtureRoot=@(argv[1]);fixtureMode=@(argv[2]);NSString *cache=@(argv[3]);
     Method a=class_getClassMethod(NSURLSessionConfiguration.class,@selector(ephemeralSessionConfiguration));
     Method b=class_getClassMethod(NSURLSessionConfiguration.class,@selector(dm_bcat_fixture_configuration));method_exchangeImplementations(a,b);
+    if([fixtureMode hasPrefix:@"delivery-"]){
+        if(![NSFileManager.defaultManager createDirectoryAtPath:fixtureHome() withIntermediateDirectories:YES attributes:nil error:nil])return 1;
+        NSString *routes=[fixtureRoot stringByAppendingPathComponent:@"routes.tsv"];
+        setenv("DM_NEXTENDO_ROUTES",routes.fileSystemRepresentation,1);
+        BOOL offline=[fixtureMode isEqual:@"delivery-offline"];
+        BOOL unavailable=offline||[fixtureMode hasSuffix:@"-empty"]||[fixtureMode isEqual:@"delivery-unlisted"];
+        setenv("DM_NETWORK",offline?"offline":"nextendo",1);
+        dm_bcat_start(fixtureRoot.fileSystemRepresentation,"0100F43008C44000",!offline);
+        const char *name=unavailable?NULL:[fixtureMode isEqual:@"delivery-updated"]?"replacement":"delivery";
+        if(dm_bcat_overlay()||archiveRequests!=(offline||[fixtureMode isEqual:@"delivery-unlisted"]?0:1)||check_delivery_sdk(name))return 1;
+        printf("%u\n",conditionals);
+        return 0;
+    }
     BOOL gate=[fixtureMode hasPrefix:@"gate-"];
     activeCache=cache;activeVersion=gate?nil:@"5.5.2";startTitle=@"0100f8f0000a2000";startOnline=![fixtureMode isEqual:@"offline"];
     NSString *seed=[fixtureRoot stringByAppendingPathComponent:@"empty-seed"];

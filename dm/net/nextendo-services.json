@@ -192,6 +192,19 @@
     "0100f9f00c696000": "demonware",
     "0100ea6014bb8000": "ubisoft"
   },
+  "delivery": {
+    "0100f8f0000a2000": {"bcat": true},
+    "01003bc0000a0000": {"bcat": true},
+    "01003c700009c800": {"bcat": true},
+    "0100c2500fc20000": {"bcat": true},
+    "0100a3d008c5c000": {"bcat": true, "bcatFallback": "01008f6008c5e000"},
+    "01008f6008c5e000": {"bcat": true},
+    "0100f43008c44000": {"bcat": true},
+    "0100abf008968000": {"bcat": true},
+    "01008db008c2c000": {"bcat": true},
+    "0100d2f00d5c0000": {"bcat": true},
+    "01006a800016e000": {"bcat": true}
+  },
   "identities": {
     "01006f8002326000": {
       "account": "baas",

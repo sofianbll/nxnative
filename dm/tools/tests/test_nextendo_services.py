@@ -40,7 +40,10 @@ class NextendoServicesTests(unittest.TestCase):
             self.assertEqual([r for r in rows if r[4] == filename], [[
                 'exact', 't-4e44e7a0-lp1.lp1.t.npln.srv.nintendo.net', value['provider']['server'], '@host', filename, digest, ZA + ':2']])
             self.assertEqual(next(r[4] for r in rows if r[1] == 'nintendo.net'), 'provider-ca.der')
-            self.assertEqual(json.loads((out / 'manifest.json').read_text())['files'][filename], digest)
+            manifest = json.loads((out / 'manifest.json').read_text())
+            self.assertEqual(manifest['files'][filename], digest)
+            self.assertIs(manifest['bcat'], True)
+            self.assertNotIn('bcat', json.loads((other / 'manifest.json').read_text()))
             self.assertEqual((out / filename).read_bytes(), dedicated)
             cached = root / 'Library/Application Support/nxnative/nextendo' / ('public-' + filename)
             self.assertEqual(cached.stat().st_mode & 0o777, 0o600)

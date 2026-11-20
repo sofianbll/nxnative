@@ -530,6 +530,10 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - a service template reaches native DNS unchanged, or an IP handoff loses the logical TLS service identity. → [Explicit routing and NSD](../reference/online-services.md#explicit-routing-and-nsd)
 - a service transport works but the SDK has no usable account identity/token or friends snapshot. → [Account and social providers](../reference/online-services.md#account-and-social-providers)
 
+## Nextendo BCAT delivery
+
+- Pokémon Legends: Z-A 2.0.2 calls `RequestSyncDeliveryCache`, then reports `0x2a2` (`2162-0001`) without polling progress or opening a delivery file. → [Online sync fails before the delivery cache opens](../reference/nextendo-bcat.md#online-sync-fails-before-the-delivery-cache-opens)
+
 ## Movies
 
 - AAC samples after a seek or loop differ from a fresh decode of the same packets; the old position's overlap can contaminate the beginning of the new position. → [Audio decoder history survives a movie seek](../reference/movies.md#audio-decoder-history-survives-a-movie-seek)

@@ -64,14 +64,38 @@ def run():
         runtime = root / 'fixture-runtime.inc'
         runtime.write_text(source)
         binary = root / 'launch'
+        game = os.environ['DM_BCAT_TEST_GAME']
         flags = shlex.split(os.environ.get('SAN', ''))
         if os.environ.get('DM_BCAT_TEST_SANITIZE') == '1' and not flags:
             flags = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
         print('BCAT launch compiler sanitizer flags:', flags or 'none', flush=True)
         command = ['clang', '-O1', '-g', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', '-Wno-unused-parameter', '-Wno-deprecated-declarations', '-fobjc-arc', *flags,
                         '-I' + str(REPO / 'dm/host'), '-I' + str(Path(crypto) / 'include'), '-DDM_OPENSSL_X509', '-DDM_BCAT_RUNTIME_INCLUDE="' + str(runtime) + '"', '-DDM_BCAT_TITLES=@"0100f8f0000a2000",@"01003bc0000a0000",@"01003c700009c800"', '-DDM_BCAT_PLAIN_TITLE=@"01003c700009c800"',
-                        str(REPO / 'dm/host/tests/t_bcat_launch.m'), str(Path(crypto) / 'lib/libcrypto.a'), '-lz', '-framework', 'Foundation', '-o', str(binary)]
+                        '-I' + str(REPO / 'dm/host/gen' / game), '-I' + str(REPO / 'dm/games' / game),
+                        str(REPO / 'dm/host/tests/t_bcat_launch.m'), str(REPO / 'dm/host/tests/t_bcat_delivery.c'), str(REPO / 'dm/host/hle_bigstack.c'),
+                        str(Path(crypto) / 'lib/libcrypto.a'), '-lz', '-framework', 'Foundation', '-o', str(binary)]
         subprocess.run(command, check=True)
+        for name, entry in [('delivery.zip', 'normal/delivery'), ('delivery-updated.zip', 'normal/replacement'),
+                            ('delivery-bad.zip', '../delivery')]:
+            with zipfile.ZipFile(root / name, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(entry, b'bcat!')
+        profile = root / 'manifest.json'
+        profile.write_text(json.dumps({'formatVersion': 1, 'titleID': '0100f43008c44000', 'bcat': True}))
+        for mode, source, conditional in [('delivery-fresh', 'fresh', 0), ('delivery-304', 'cache', 1),
+                                          ('delivery-noetag', 'cache', 1), ('delivery-bad', 'cache', 0),
+                                          ('delivery-bad-empty', 'none', 0), ('delivery-offline', None, 0),
+                                          ('delivery-updated', 'fresh', 0), ('delivery-unlisted', None, 0)]:
+            if mode == 'delivery-unlisted':
+                profile.write_text(json.dumps({'formatVersion': 1, 'titleID': '0100152000022000', 'bcat': True}))
+            completed = subprocess.run([str(binary), str(root), mode, '-'], capture_output=True, text=True, timeout=15)
+            assert completed.returncode == 0 and completed.stdout.strip() == str(conditional), (mode, completed)
+            lines = [line for line in completed.stderr.splitlines() if line.startswith('bcat nextendo ')]
+            assert lines == ([] if source is None else [
+                f'bcat nextendo title=0100F43008C44000 http={304 if mode == "delivery-304" else 200} files={int(source != "none")} served={source}']), (mode, lines)
+        store = root / 'home-delivery/Library/Application Support/nxnative/0100F43008C44000/bcat-nextendo'
+        assert store.stat().st_mode & 0o777 == 0o700
+        assert len([p for p in store.iterdir() if p.is_dir()]) == 2
+        print('BCAT generic launch and SDK: fresh, conditional, unchanged, replacement, unsafe ZIP fallback, no cache and offline/profile gates passed')
         cache = root / 'cache'
         def launch(mode, expected, *, use_cache=cache):
             child_env = os.environ.copy()
