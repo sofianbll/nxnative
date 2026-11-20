@@ -349,7 +349,7 @@ int main(int argc, char **argv) {
     char private_routes[PATH_MAX] = "";
     if (!nextendo_at_launch(dm, sup, private_routes)) {
         if (*private_routes) removefile(private_routes, NULL, REMOVEFILE_RECURSIVE);
-        alert(name, "Cannot use the Nextendo service profile. Rebuild with --nextendo, or select Offline or Local wireless.");
+        alert(name, "Cannot use the Nextendo service profile. Rebuild with --nextendo, or select Offline or Local communication.");
         return 1;
     }
     struct sigaction sa = {.sa_handler = forward};   // no SA_RESTART: waitpid below sees EINTR and waits again

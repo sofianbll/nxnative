@@ -90,16 +90,24 @@ class LauncherSettingsTests(unittest.TestCase):
                 self.assertEqual((mac['DM_PSO_MTL4']['default'], mac['DM_NVN_ENC_THREAD']['default']), ('1', '0'))
 
     def test_network_offers_nextendo_only_in_a_nextendo_build(self):   # build_ipa.sh DM_NEXTENDO / DM_NETWORK (the NSP script's --nextendo)
-        values = lambda rows: [o[0] for o in rows['DM_NETWORK']['options']]
-        with patch.dict(os.environ, {'DM_NEXTENDO': '0', 'DM_NETWORK': 'offline'}):
-            plain = build(WONDER, 'nvn')
-            self.assertEqual(values(build(WONDER, 'nvn', 'mac')), ['offline', 'lan', 'ldn'])
-        self.assertEqual((values(plain), plain['DM_NETWORK']['default']), (['offline', 'lan', 'ldn'], 'offline'))
-        with patch.dict(os.environ, {'DM_NEXTENDO': '1', 'DM_NETWORK': 'nextendo'}):
-            online = build(WONDER, 'nvn')
-            mac = build(WONDER, 'nvn', 'mac')
-        self.assertEqual((values(online), online['DM_NETWORK']['default']), (['offline', 'lan', 'ldn', 'nextendo'], 'nextendo'))
-        self.assertEqual((values(mac), mac['DM_NETWORK']['default']), (['offline', 'lan', 'ldn', 'nextendo'], 'offline'))
+        options = [['offline', 'Offline'], ['ldn', 'Local communication'], ['lan', 'LAN mode']]
+        notes = {
+            'offline': 'No network. Code mods work.',
+            'ldn': 'Like nearby play on Switch: play with Macs or iPhones on the same Wi-Fi.',
+            'lan': "The game's LAN mode, if it has one: devices on the same network.",
+        }
+        for platform in ('ios', 'mac'):
+            for enabled in ('0', '1'):
+                online = enabled == '1'
+                extra = [['nextendo', 'Online (Nextendo)']] if online else []
+                extra_notes = {'nextendo': 'Internet through Nextendo, account required. Code mods are turned off.'} if online else {}
+                with self.subTest(platform=platform, nextendo=enabled), \
+                        patch.dict(os.environ, {'DM_NEXTENDO': enabled, 'DM_NETWORK': 'nextendo' if online else 'offline'}):
+                    network = build(WONDER, 'nvn', platform)['DM_NETWORK']
+                    self.assertEqual(network['options'], options + extra)
+                    self.assertEqual(network['option_notes'], notes | extra_notes)
+                    self.assertEqual(network['note'], 'Choose how this game connects.')
+                    self.assertEqual(network['default'], 'nextendo' if online and platform == 'ios' else 'offline')
 
     def test_unknown_platform_is_rejected(self):
         with self.assertRaisesRegex(SystemExit, 'SETTINGS_PLATFORM must be ios or mac'):

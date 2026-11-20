@@ -95,9 +95,9 @@ Shows the frames per second at the top left.
 
 ### Network
 
-How the game reaches other players. **Offline** is the default and keeps the game off the network. **LAN** and **Local wireless** play with devices on the same Wi-Fi network: LAN for games with a LAN mode, Local wireless for the Switch's local play between consoles.
+How the game reaches other players. **Offline** is the default and keeps the game off the network. **Local communication** and **LAN mode** play with devices on the same Wi-Fi network: Local communication for the Switch's local play between consoles, LAN mode for games with a LAN mode.
 
-**Nextendo (online)** is offered only by an app built with `--nextendo`. It plays online through Nextendo, a community service that stands in for Nintendo's servers. On iPhone it is the default; sign in under **Online** below the settings first. On Mac, sign in through your front end or the [Mac sign-in tool](frontends.md#nextendo-on-mac), then select Nextendo; the default stays Offline. Nextendo gives a game token only to an account with a confirmed e-mail and a linked Discord account.
+**Online (Nextendo)** is offered only by an app built with `--nextendo`. It plays online through Nextendo, a community service that stands in for Nintendo's servers. On iPhone it is the default; sign in under **Online** below the settings first. On Mac, sign in through your front end or the [Mac sign-in tool](frontends.md#nextendo-on-mac), then select **Online (Nextendo)**; the default stays Offline. Nextendo gives a game token only to an account with a confirmed e-mail and a linked Discord account.
 
 The packed app already carries Nextendo's public certificates. The game takes your name, country and, when the account has one, your birthday from your Nextendo account. On iPhone, **Birthday, if Nextendo has none** under **Online** is used only when the account gives none.
 

@@ -57,6 +57,12 @@ def fixups_keys(path):   # '# KEY<TAB>value' header rows of a rewriter table, as
 
 
 UNKNOWN_LANGUAGES = 'This game\'s files do not list its languages, so some of these may not be in the game. It may then show another one.'
+NETWORK_OPTION_NOTES = {
+    'offline': 'No network. Code mods work.',
+    'ldn': 'Like nearby play on Switch: play with Macs or iPhones on the same Wi-Fi.',
+    'lan': "The game's LAN mode, if it has one: devices on the same network.",
+    'nextendo': 'Internet through Nextendo, account required. Code mods are turned off.',
+}
 
 
 def build(gid, patched, control, other_programs=()):
@@ -122,6 +128,7 @@ def build(gid, patched, control, other_programs=()):
             if any(len(o) != 2 for o in opts): sys.exit(f'settings.tsv:{n}: choice values are value=label,...')
             if s['default'] not in [o[0] for o in opts]: s['default'] = opts[0][0]   # a default the game does not offer (a language it lacks): its first
             s['options'] = opts
+            if var == 'DM_NETWORK': s['option_notes'] = {v: NETWORK_OPTION_NOTES[v] for v, _ in opts}
             if values == 'languages' and not have: s['note'] = UNKNOWN_LANGUAGES
         elif kind == 'range':
             lo, hi, st = (float(x) for x in values.split(':'))
