@@ -19,9 +19,9 @@ FILES = ['tools/dmsh_chain.py', 'tools/dmsh_build.py', 'tools/dmsh_atomic.py', '
 # This target-specific lowering lives in the vendored translator. Include its
 # sources as well as the rebuilt translator's fingerprint; no old shader cache can bypass it.
 FILES += ['../third_party/ryujinx/src/Ryujinx.Graphics.Shader/' + f for f in (
-    'Instructions/InstEmitSurface.cs', 'IntermediateRepresentation/TextureFlags.cs',
+    'Instructions/InstEmitSurface.cs', 'Instructions/InstEmitAttribute.cs', 'SupportBuffer.cs', 'IntermediateRepresentation/TextureFlags.cs',
     'Translation/TranslationFlags.cs', 'Translation/HostCapabilities.cs',
-    'Translation/Transforms/GeometryToCompute.cs', 'Translation/ResourceReservations.cs', 'Translation/TranslatorContext.cs', 'Translation/Translator.cs', 'Translation/EmitterContext.cs', 'Translation/ShaderDefinitions.cs', 'CodeGen/Spirv/Instructions.cs',
+    'Translation/Transforms/GeometryToCompute.cs', 'Translation/Transforms/TexturePass.cs', 'Translation/HelperFunctionManager.cs', 'Translation/ResourceReservations.cs', 'Translation/TranslatorContext.cs', 'Translation/Translator.cs', 'Translation/EmitterContext.cs', 'Translation/ShaderDefinitions.cs', 'CodeGen/Spirv/Instructions.cs',
     'StructuredIr/ShaderProperties.cs', 'StructuredIr/AstOperand.cs', 'StructuredIr/AstOptimizer.cs', 'StructuredIr/StructuredProgram.cs',
     'Translation/Optimizations/BindlessElimination.cs', 'Translation/Optimizations/Optimizer.cs',
     'Translation/Optimizations/GlobalToStorage.cs', 'CodeGen/Spirv/SpirvGenerator.cs')]

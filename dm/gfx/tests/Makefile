@@ -673,6 +673,9 @@ check_t_za_scale: t_za_scale
 	MTL_DEBUG_LAYER=1 ./t_za_scale 1.5
 	MTL_DEBUG_LAYER=1 ./t_za_scale 2
 	MTL_DEBUG_LAYER=1 ./t_za_scale 2 other-build
+ifeq ($(GAME),0100F43008C44000)
+	MTL_DEBUG_LAYER=1 DM_TEST_ZA_SIZE="$(CURDIR)/t_za_scale" python3 test_za_texture_size.py
+endif
 t_image_alias: t_image_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_image_alias.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_image_alias

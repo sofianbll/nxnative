@@ -33,16 +33,84 @@ static void expect_pixels(const tex_t *t, id<MTLTexture> mt, unsigned lv, unsign
     CHECK(out[2] == 0x12345678 && out[5] == 0x12345678, "CPU read preserves row padding");
 }
 
+static int query_mips(const char **argv, float k) {
+    NSError *err = nil;
+    id<MTLLibrary> lib = [g_dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[2])] error:&err];
+    id<MTLFunction> fn = [lib newFunctionWithName:@"main0"];
+    id<MTLComputePipelineState> ps = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&err] : nil;
+    if (!ps) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String ?: "missing shader"); return 1; }
+    int array = strcmp(argv[3], "2darray") == 0, volume = strcmp(argv[3], "3d") == 0;
+    int sup = atoi(argv[4]), tex = atoi(argv[5]), dst = atoi(argv[6]), slot = atoi(argv[7]);
+    const unsigned sizes[][2] = {{1920,1080}, {1366,768}, {15,9}};
+    for (int i = 0; i < 3; i++) {
+        unsigned w = sizes[i][0], h = sizes[i][1], levels = 1;
+        if (volume && w > 64) continue;   // no large 3D allocations: only scaled 2D is supported
+        while (MAX(w,h) >> levels) levels++;
+        float scale = array || volume ? 1 : k;
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+            width:lroundf(w*scale) height:lroundf(h*scale) mipmapped:YES];
+        td.textureType = array ? MTLTextureType2DArray : volume ? MTLTextureType3D : MTLTextureType2D;
+        td.arrayLength = array ? 5 : 1; td.depth = volume ? 5 : 1; td.mipmapLevelCount = levels;
+        td.storageMode = MTLStorageModePrivate; td.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+        id<MTLTexture> full = [g_dev newTextureWithDescriptor:td];
+        if (!full) return 1;
+        if (scale != 1) rs_mark(full, (uint64_t)h << 32 | w);
+        for (unsigned first = 0; first <= (array || volume ? 0 : 2); first++) {
+            id<MTLTexture> view = first ? [full newTextureViewWithPixelFormat:full.pixelFormat textureType:full.textureType
+                levels:NSMakeRange(first, levels - first) slices:NSMakeRange(0, 1)] : full;
+            if (first == 2) {
+                id<MTLTexture> parent = [full newTextureViewWithPixelFormat:full.pixelFormat textureType:full.textureType
+                    levels:NSMakeRange(1, levels - 1) slices:NSMakeRange(0, 1)];
+                view = [parent newTextureViewWithPixelFormat:parent.pixelFormat textureType:parent.textureType
+                    levels:NSMakeRange(1, levels - 2) slices:NSMakeRange(0, 1)];
+            }
+            MTLTextureDescriptor *outd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint width:16 height:3 mipmapped:NO];
+            outd.storageMode = MTLStorageModeShared; outd.usage = MTLTextureUsageShaderWrite;
+            id<MTLTexture> output = [g_dev newTextureWithDescriptor:outd];
+            id<MTLBuffer> sb = [g_dev newBufferWithLength:1536 options:MTLResourceStorageModeShared];
+            if (!view || !output || !sb) return 1;
+            memset(sb.contents, 0, sb.length);
+            float *row = (float *)((char *)sb.contents + DMSH_SUPPORT_SCALE_OFF + 16 * slot); row[0] = 1;
+            rs_support_texture(row, view, 0);
+            id<MTLArgumentEncoder> args = [fn newArgumentEncoderWithBufferIndex:0];
+            id<MTLBuffer> ab = [g_dev newBufferWithLength:args.encodedLength options:MTLResourceStorageModeShared];
+            [args setArgumentBuffer:ab offset:0];
+            if (sup >= 0) [args setBuffer:sb offset:0 atIndex:sup];
+            [args setTexture:view atIndex:tex]; [args setTexture:output atIndex:dst];
+            id<MTLCommandBuffer> cb = q_cb(); id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:ps]; [enc setBuffer:ab offset:0 atIndex:0];
+            [enc useResource:view usage:MTLResourceUsageRead]; [enc useResource:output usage:MTLResourceUsageWrite];
+            if (sup >= 0) [enc useResource:sb usage:MTLResourceUsageRead];
+            [enc dispatchThreads:MTLSizeMake(levels - first, 1, 1) threadsPerThreadgroup:MTLSizeMake(16, 1, 1)];
+            [enc endEncoding]; [cb commit]; [cb waitUntilCompleted];
+            if (cb.status != MTLCommandBufferStatusCompleted) return 1;
+            uint32_t got[3][16];
+            [output getBytes:got bytesPerRow:sizeof got[0] fromRegion:MTLRegionMake2D(0,0,16,3) mipmapLevel:0];
+            for (unsigned l = 0; l + first < levels; l++) {
+                uint32_t want[] = {MAX(1u,w >> (l + first)), MAX(1u,h >> (l + first)), array ? 5 : MAX(1u,5 >> l)};
+                for (int axis = 0; axis < (array || volume ? 3 : 2); axis++) if (got[axis][l] != want[axis]) {
+                    fprintf(stderr, "%s %ux%u@%g mip %u+%u axis %d: got %u, want %u\n", argv[3], w, h, scale, first, l, axis, got[axis][l], want[axis]);
+                    failed++;
+                }
+            }
+        }
+    }
+    printf("Z-A translated TXQ %s at %g: %d failures\n", argv[3], k, failed);
+    return failed != 0;
+}
+
 int main(int argc, char **argv) { @autoreleasepool {
-    if (argc != 2 && argc != 3) return 2;
+    if (argc != 2 && argc != 3 && argc != 8) return 2;
     float k = strtof(argv[1], NULL);
     uint8_t state[32] = {0}; memcpy(state + 0x10, &k, sizeof k);
     module_t main = {.name="main", .build_id="b1f12fd919eae86ab8a978317677e64b"};
     if (argc == 3 || DM_GAME_PROGRAM_ID != 0x0100f43008c44000ull) main.build_id[0] = '0';
     g_mod = &main; g_nmod = 1;
     extern uint8_t *dm_fps_state; dm_fps_state = state;
-    float want = argc == 2 && DM_GAME_PROGRAM_ID == 0x0100f43008c44000ull ? k : 1.0f;
-    mtl_init(); mtl_sub_begin();
+    float want = argc != 3 && DM_GAME_PROGRAM_ID == 0x0100f43008c44000ull ? k : 1.0f;
+    mtl_init();
+    if (argc == 8) return query_mips((const char **)argv, want);
+    mtl_sub_begin();
     tex_t t = target(76501,192,108,1), shadow = target(76502,1024,1024,1);
     mtl_tex_init(&t); mtl_tex_init(&shadow);
     id<MTLTexture> mt = tex_mtl(&t);

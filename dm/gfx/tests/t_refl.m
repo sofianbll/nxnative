@@ -18,6 +18,14 @@ static void check(const char *what, long want, long got) {
 
 int main(void) { @autoreleasepool {
     nvn_refl r; char err[160] = "";
+    {   // The support-buffer slot is the translator's descriptor index, not the Metal argument ID.
+        NSMutableDictionary *b = [@{@"kind": @"tex", @"arg_id": @9, @"reg": @2, @"msl_type": @"texture2d<float>", @"msl_name": @"fp_t_tcb_C", @"rs_index": @3} mutableCopy];
+        NSDictionary *j = @{@"route": @"B", @"bindings": @[b]};
+        check("render scale reflection", 0, nvn_refl_from_json(j, &r, err, sizeof err));
+        check("render scale support slot", 4, r.b[0].rs_slot);
+        b[@"rs_index"] = @(DMSH_SUPPORT_SCALE_SLOTS - 1);
+        check("render scale slot outside the block rejected", 1, nvn_refl_from_json(j, &r, err, sizeof err) != 0);
+    }
     {   // Pointer discovery is metadata on the existing pool-table binding; there is no new GPU argument.
         NSMutableDictionary *b = [@{@"kind": @"gmem_map", @"arg_id": @0, @"msl_name": @"cp_s0", @"pointers": @[@[@1, @8], @[@0, @0]]} mutableCopy];
         NSDictionary *j = @{@"route": @"B", @"bindings": @[b]};

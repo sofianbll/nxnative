@@ -3275,7 +3275,7 @@ static void rs_init(void) {
     if (!dm_fps_state || strcmp(dm_main_build(), "b1f12fd919eae86ab8a978317677e64b")) return;
     float value;
     memcpy(&value, dm_fps_state + 0x10, sizeof value);  // validated by the loader against this main's fixups
-    // The rewriter does not advertise scaled rendering yet: the shader-side mip sizes and Hi-Z still need work.
+    // The rewriter does not advertise scaled rendering until Hi-Z is checked in gameplay.
     if (value != 1.5f && value != 2.0f) return;
     g_rs = value;
     MLOG("Z-A: Metal render targets at %.2fx (DM_RENDER_SCALE)", g_rs);
@@ -3285,10 +3285,10 @@ static float rs_k(void) {
     pthread_once(&g_rs_once, rs_init); return g_rs;
 }
 static char g_rs_key;  // a marker owned by the physical allocation, not by the NVN serial or Metal view
-static void rs_mark(id<MTLTexture> tex) {
+static void rs_mark(id<MTLTexture> tex, uint64_t guest) {
     id<MTLTexture> root = tex;
     for (id<MTLTexture> p = root.parentTexture; p; p = p.parentTexture) root = p;
-    objc_setAssociatedObject(root, &g_rs_key, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(root, &g_rs_key, @(guest), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 static int rs_rule(const tex_t *t) {
     if (rs_k() == 1.0f || t->d.target != NVN_TEXTURE_TARGET_2D || t->d.samples > 1 ||
@@ -3299,10 +3299,24 @@ static int rs_rule(const tex_t *t) {
     double a = (double)t->d.width / (double)t->d.height;
     return fabs(a / (16.0 / 9.0) - 1.0) < 0.02;
 }
-static float rs_of(id<MTLTexture> t) {
-    if (!t || rs_k() == 1.0f) return 1.0f;
-    id<MTLTexture> b = t; for (id<MTLTexture> p = t.parentTexture; p; p = p.parentTexture) b = p;   // a view of a view too (an sRGB / linear twin's, and an ID's view of that)
-    return objc_getAssociatedObject(b, &g_rs_key) ? rs_k() : 1.0f;
+static uint64_t rs_guest_base(id<MTLTexture> t, unsigned *level) {
+    if (!t || rs_k() == 1.0f) return 0;
+    id<MTLTexture> root = t;
+    for (id<MTLTexture> p = t.parentTexture; p; p = p.parentTexture) {
+        if (level) *level += root.parentRelativeLevel;
+        root = p;
+    }
+    return [objc_getAssociatedObject(root, &g_rs_key) unsignedLongLongValue];
+}
+static float rs_of(id<MTLTexture> t) { return rs_guest_base(t, NULL) ? rs_k() : 1.0f; }
+static int rs_support_texture(float row[4], id<MTLTexture> t, int same_pass) {
+    unsigned lv = 0;
+    uint64_t base = rs_guest_base(t, &lv);
+    if (!base) return 0;
+    row[0] = same_pass ? -rs_k() : rs_k();
+    row[1] = (float)MAX(1u, (uint32_t)base >> MIN(lv, 31u));
+    row[2] = (float)MAX(1u, (uint32_t)(base >> 32) >> MIN(lv, 31u));
+    return 1;
 }
 static uint32_t rs_dim(uint32_t v) { return (uint32_t)lroundf((float)v * rs_k()); }
 static inline long rs_px(long v, double k) { return k == 1.0 ? v : lround(v * k); }
@@ -3356,7 +3370,8 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
         upgraded = raw ? [raw newTextureViewWithPixelFormat:base.pixelFormat] : nil;
         if (upgraded) { res_add(raw); NvAtomicRaw *own = [NvAtomicRaw new]; own->raw = raw; objc_setAssociatedObject(upgraded, &g_atomic_raw_key, own, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
     } else upgraded = backing ? [backing newTextureWithDescriptor:d offset:base.bufferOffset bytesPerRow:base.bufferBytesPerRow] : [g_dev newTextureWithDescriptor:d];
-    if (upgraded && rs_of(base) != 1.0f) rs_mark(upgraded);
+    uint64_t guest = rs_guest_base(base, NULL);
+    if (upgraded && guest) rs_mark(upgraded, guest);
     if (!upgraded) { RED_ONCE(45, "texture upgrade failed ser=%llu format %lu → %lu usage %#lx", t->serial, (unsigned long)base.pixelFormat, (unsigned long)view_pf, (unsigned long)d.usage); return base; }
     if (!reinterpret) res_add(upgraded);
     id<MTLTexture> upgraded_view = nil;
@@ -5485,7 +5500,7 @@ static void *tex_mtl_resolve(const tex_t *ct, int *in_storage, id<MTLTexture> __
         if (!mt && !rs) mt = image_texture(t, d);
         if (!mt) { mt = rs ? nil : rh_texture(t, d); if (!mt) mt = [g_dev newTextureWithDescriptor:d];   // nor a recycled heap of that size
             if (mt) { res_add(mt); if (rs || (!bcp_up_fill(t, mt) && !tex_init_fill(t, mt))) tex_zero_fill(mt); } }   // a side of a compressed-alias pair takes the other side's bytes (bcp_up_fill)
-        if (mt && rs) { rs_mark(mt);
+        if (mt && rs) { rs_mark(mt, (uint64_t)t->d.height << 32 | t->d.width);
             static int n; if (n++ < 12) MLOG("[rescale] texture %llu %ux%u format %#x levels %d target %d made at %lux%lu", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, t->d.levels, t->d.target, (unsigned long)mt.width, (unsigned long)mt.height); }
         if (!mt) { RED_ONCE(2, "failed to create MTLTexture %ux%u format %#x target %d", t->d.width, t->d.height, t->d.format, t->d.target); return NULL; }
     }
@@ -12758,8 +12773,7 @@ static void bind_args(id<MTLCommandEncoder> en, int nvn_stage, int metal_vertex,
 static id<MTLBuffer> support_buf(void) {
     static __strong id<MTLBuffer> b; if (b) return b;
     b = [g_dev newBufferWithLength:65536 options:MTLResourceStorageModeShared]; res_add(b);   // All 0 when newly created
-    const int render_scale_off = 192;   // Measured MSL layout: alpha_test 0, is_bgra[8] 16, viewport_inverse 144, viewport_size 160, frag_scale_count 176, render_scale float4[73] 192 (take .x)
-    for (int i = 0; i < 73; i++) *(float *)((uint8_t *)b.contents + render_scale_off + 16 * i) = 1.0f;
+    for (int i = 0; i < DMSH_SUPPORT_SCALE_SLOTS; i++) *(float *)((uint8_t *)b.contents + DMSH_SUPPORT_SCALE_OFF + 16 * i) = 1.0f;
     const char *cascades = DM_GAME_SHADOW_CASCADES ? getenv("DM_ZA_SHADOW_CASCADES") : NULL;
     if (cascades && !strcmp(cascades, "1")) {
         *(float *)((uint8_t *)b.contents + DMSH_SUPPORT_SHADOW_CASCADES_OFF) = 1.0f;
@@ -13356,8 +13370,8 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
     // The length table of the bounded storage buffers (dmsh_abi.h DMSH_SBLEN_BANK, sblen_put), filled as they are encoded; 0 for a slot with no buffer, which reads nothing
     uint32_t *sblen = NULL; uint64_t sblen_gpu = 0; __strong id<MTLBuffer> sblen_buf = nil;
     if (sh->rf.sblen) { arena_at at = arena_take(DMSH_SBLEN_SLOTS * 8u, &sblen_buf); sblen = (uint32_t *)(void *)at.cpu; sblen_gpu = at.gpu; memset(sblen, 0, DMSH_SBLEN_SLOTS * 8u); }
-    int rs_on = rs_k() != 1.0f, rs_sup = -1, rs_nt = 0, rs_ni = 0, rs_any = 0;
-    struct { uint16_t aid; float k; } rs_t[64], rs_i[8];   // texture and image scales for the shader's texel fetches
+    int rs_on = rs_k() != 1.0f, rs_sup = -1, rs_any = 0;
+    float rs_rows[DMSH_SUPPORT_SCALE_SLOTS][4]; if (rs_on) memset(rs_rows, 0, sizeof rs_rows);
     os_unfair_lock_lock(&g_rmu);   // The texture / sampler registration tables may be being grown or rewritten by the game thread
     for (int i = 0; i < sh->rf.nb; i++) {
         const nvn_rbind *b = &sh->rf.b[i];
@@ -13444,7 +13458,8 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
             if (!t) { t = dummy_tex(b->dtt, b->dpf); trid = g_dummy_tex_rid[b->dtt % DMY_NT][b->dpf & 3]; }
             else if (b->dtt == (uint8_t)MTLTextureTypeTextureBuffer) t = tbuf_shadow(tid, t, &trid);   // see tbuf_shadow
             slots[aid] = trid;
-            if (rs_on && rs_nt < 64) { float k = rs_of(snap >= 0 ? g_fb_src[snap] : t); rs_t[rs_nt++] = (typeof(rs_t[0])){(uint16_t)aid, k}; rs_any |= k != 1.0f; }
+            if (rs_on && b->rs_slot)
+                rs_any |= rs_support_texture(rs_rows[b->rs_slot], snap >= 0 ? g_fb_src[snap] : t, nvn_stage == 1 && g_pass_rs != 1.0f);
             USE(t, MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_IMG || b->kind == NVN_RB_IMGU) {   // Storage image: NVN image slot r (BindImages) ↔ D3D u_r, or its handle in a uniform buffer (IMGU)
             if (rt) {
@@ -13457,7 +13472,6 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
                     // reinterpreting the actual image's format.
                     id<MTLTexture> dummy=dummy_img(b->dtt,b->dpf);
                     slots[aid]=dummy.gpuResourceID._impl;USE(dummy,MTLResourceUsageRead|MTLResourceUsageWrite);
-                    if (rs_on && rs_ni < 8) rs_i[rs_ni++] = (typeof(rs_i[0])){(uint16_t)aid, 1.0f};
                     continue;
                 }
             }
@@ -13483,7 +13497,8 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
             if (passdump()) PD("W %llu st%d reg%d tid=%d %s ser=%llu fmt=%lu %lux%lu view_sl=%lu array=%lu target=%lu shader wants target %u", g_stat_pass, nvn_stage, reg, tid, real ? "real" : "dummy", real && tid < g_ntreg ? g_treg[tid].t.serial : 0ull,
                                   (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)(t.parentTexture ? t.parentRelativeSlice : 0), (unsigned long)t.arrayLength, (unsigned long)t.textureType, (unsigned)b->dtt);
             slots[aid] = trid;
-            if (rs_on && rs_ni < 8) { float k = rs_of(snap >= 0 ? g_fb_src[snap] : t); rs_i[rs_ni++] = (typeof(rs_i[0])){(uint16_t)aid, k}; rs_any |= k != 1.0f; }
+            if (rs_on && b->rs_slot)
+                rs_any |= rs_support_texture(rs_rows[b->rs_slot], snap >= 0 ? g_fb_src[snap] : t, 0);
             USE(t, snap >= 0 ? MTLResourceUsageRead : MTLResourceUsageRead | MTLResourceUsageWrite);
         } else if (b->kind == NVN_RB_TBUF || b->kind == NVN_RB_TBUFU) {   // Typed buffer: the buffer texture (target BUFFER) in texture slot r, or its handle in a uniform buffer (TBUFU)
             // A type-1 handle ORs two words, in either order, even for a samplerless fetch. Civilization VI's glyph vertices take the texture ID from the second word;
@@ -13497,7 +13512,6 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
             else if (b->tbx) { if (tbias) tbias[b->tbx - 1] = tbuf_lead(tid, t); }   // read in place, the shader moving its coordinates by the elements before it (tbuf_lead)
             else t = tbuf_shadow(tid, t, &trid);   // see tbuf_shadow
             slots[aid] = trid;
-            if (rs_on && rs_nt < 64) rs_t[rs_nt++] = (typeof(rs_t[0])){(uint16_t)aid, 1.0f};
             USE(t, MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_TEXD) {   // dynamic handle array (profile key tex_dyn_slots): element k = the texture in slot k (combined, else separate), since c2 holds slot indices for this shader (see DRV2 below)
             uint64_t real = 0;   // the elements that got a texture of the declared kind (logged on the shader's first encode: logged bit 0)
@@ -13684,14 +13698,9 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
     if (rs_sup >= 0 && (rs_any || (nvn_stage == 1 && g_pass_rs != 1.0f))) {
         id<MTLBuffer> sb; arena_at sat = arena_take(1536, &sb); uint8_t *sp = sat.cpu;
         memcpy(sp, support_buf().contents, 1536);
-        if (nvn_stage == 1) *(float *)(sp + 192) = g_pass_rs;
-        for (int a = 1; a < rs_nt; a++) for (int c = a; c > 0 && rs_t[c].aid < rs_t[c - 1].aid; c--) { typeof(rs_t[0]) x = rs_t[c]; rs_t[c] = rs_t[c - 1]; rs_t[c - 1] = x; }
-        for (int a = 1; a < rs_ni; a++) for (int c = a; c > 0 && rs_i[c].aid < rs_i[c - 1].aid; c--) { typeof(rs_i[0]) x = rs_i[c]; rs_i[c] = rs_i[c - 1]; rs_i[c - 1] = x; }
-        for (int n = 0; n < rs_nt + rs_ni && n < 72; n++) {
-            float k = n < rs_nt ? rs_t[n].k : rs_i[n - rs_nt].k;
-            if (nvn_stage == 1 && n < rs_nt && k != 1.0f && k == g_pass_rs) k = -k;
-            *(float *)(sp + 192 + 16 * (1 + n)) = k;
-        }
+        if (nvn_stage == 1) *(float *)(sp + DMSH_SUPPORT_SCALE_OFF) = g_pass_rs;
+        for (int n = 1; n < DMSH_SUPPORT_SCALE_SLOTS; n++)
+            if (rs_rows[n][0]) memcpy(sp + DMSH_SUPPORT_SCALE_OFF + 16 * n, rs_rows[n], sizeof rs_rows[n]);
         slots[rs_sup] = sat.gpu; { int reg = 0, aid = rs_sup; USE(sb, MTLResourceUsageRead); }
     }
     #undef USE
@@ -19502,7 +19511,7 @@ static uint64_t snap_take(const tex_t *t) {
         // and a texture removed here was sampled outside the residency set by a display command buffer still queued
         g_snap[k].old = dst;
         dst = [g_dev newTextureWithDescriptor:d]; if (!dst) { RED_ONCE(112, "present snapshots: no texture"); return 0; }
-        if (scale != 1.0f) rs_mark(dst);
+        if (scale != 1.0f) rs_mark(dst, rs_guest_base(src, NULL));
         [g_snap_res addAllocation:dst]; [g_snap_res commit];
         if (!g_snap[k].serial) { static _Atomic uint64_t n; g_snap[k].serial = (1ull << 61) + atomic_fetch_add(&n, 1) + 1; }
         serial_put(g_snap[k].serial, dst); g_snap[k].tex = dst;

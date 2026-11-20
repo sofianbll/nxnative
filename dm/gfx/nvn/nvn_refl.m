@@ -135,6 +135,13 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             else if ([k isEqualToString:@DMSH_KIND_BORDER]) { if (o->border) FAIL("two border colour blocks"); r->kind = NVN_RB_BORDER; o->border = (uint8_t)(o->nb + 1); }
             else FAIL("B binding kind %s not implemented (%s)", k.UTF8String, [b[@"msl_name"] UTF8String]);
             if (r->kind == NVN_RB_TEXU || r->kind == NVN_RB_TEXA) r->f1d = [b[@"fetch1d"] boolValue];
+            if (b[@"rs_index"]) {
+                int idx = [b[@"rs_index"] intValue];
+                if (idx < 0 || idx >= DMSH_SUPPORT_SCALE_SLOTS - 1 || r->n ||
+                    (r->kind != NVN_RB_TEX && r->kind != NVN_RB_TEXU && r->kind != NVN_RB_IMG && r->kind != NVN_RB_IMGU))
+                    FAIL("B binding %s: invalid render scale slot %d", nm.UTF8String, idx);
+                r->rs_slot = (uint8_t)(idx + 1);
+            }
             id tx = b[@"tbx"];   // a buffer image's or buffer texture's index; rows also take a logical-width group after their leads
             if (tx) { int x = [tx intValue], arr = r->kind == NVN_RB_TEXA, rows = r->f1d && r->dtt == MTLTextureType2D;
                 int count = (r->n ? r->n : 1) * (rows ? 2 : 1);
