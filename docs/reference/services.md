@@ -1170,6 +1170,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `dm/tools/tests/test_nextendo_patches.py` (synthetic catalogs: exact identity, guards, IPS32 bounds, an NSO copy with its build ID and segment hashes) and `dm/tools/tests/test_nextendo_services.py` (routes and manifest for Wonder).
 - **Found on:** Super Mario Bros. Wonder 1.2.1 on an iPhone: with the catalog's patch, sign-in, the online menu, creating a room and searching for rooms work. Mario Kart 8 Deluxe 4.0.1 is listed with no patch.
 
+### Nextendo game patch fails on ZBIC-compressed NSOs
+
+- **Symptom:** `--nextendo` stops at `Nextendo game patch` with `LZ4BlockError`, although `rewrite` succeeded.
+- **Cause:** the patch adapter treated all compressed NSO segments as LZ4, including ZBIC segments (NSO flag bit 7). It decoded them before checking for an exact catalog match.
+- **Fix:** the adapter uses the same validated NSO loader as the rewriter. Any patched copy is stored uncompressed; a build with no signed patch keeps its original main.
+- **Check:** `dm/tools/tests/test_nextendo_patches.py` covers a ZBIC main with and without a matching patch, using a synthetic decoder.
+- **Found on:** Ocarina of Time v131072, with no entry in signed patch catalog revision 18. The patch stage succeeds on a copy of its extracted main; this does not establish online support.
+
 ### Nextendo's NEX server presents a self-signed certificate
 
 - **Symptom:** in Nextendo mode, with the sign-in working, a NEX game's online menu shows an error (Mario Kart 8 Deluxe: 2306-0502). With `DM_SSL_TRACE=1` the log has the name lookup and connect to its game server (`g2b309e01-lp1.s.n.srv.nintendo.net`), then `[ssl-trace] stage=5 ... result=0x000002a2 native=-9841`: the certificate check failed.
