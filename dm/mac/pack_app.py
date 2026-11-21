@@ -65,8 +65,8 @@ def can_clone(src, dst_dir):   # whether src (a file such as a RomFS image, or a
 
 
 def tree_bytes(d):
-    if d.is_file(): return d.stat().st_size
-    return sum((Path(r) / f).stat().st_size for r, _, fs in os.walk(d) for f in fs)
+    if d.is_symlink(): return d.lstat().st_size
+    return sum(row[2] for row in inventory(d) if not stat.S_ISDIR(row[1]))
 
 
 def copy(srcs, dst, clone):   # cp -R of each source to dst (a new path for one folder, an existing folder for files); -c clones, -X keeps a copy's extended attributes out of the app (cp rejects -c -X together)
@@ -198,19 +198,16 @@ PROGRAM_ROMFS = 'romfs_programs'   # beside the RomFS: <index>.img of each other
 def data_bundle(contents, name): return contents / 'PlugIns' / f'{name}.bundle'
 
 
-def data_reused(old_app, previous, name, key, dst):
-    """Clone the bundle <name> of the app being replaced to dst when the last pack (previous: its <out.app>.key) made it from these inputs (key) and its files are as that pack left
-    them → True"""
-    if not old_app or not isinstance(previous, dict) or not isinstance(previous.get('data'), dict) or previous['data'].get(name) != key or not isinstance(previous.get('app'), list): return False
+def reusable_data(old_app, previous, name, key):
+    """The old bundle if its recorded inputs match and its files are unchanged."""
+    if not old_app or not isinstance(previous, dict) or not isinstance(previous.get('data'), dict) or previous['data'].get(name) != key or not isinstance(previous.get('app'), list): return None
     b = data_bundle(old_app / 'Contents', name); top = str(b.relative_to(old_app))
     want = {r[0]: r[1:] for r in previous['app'] if isinstance(r, list) and r and isinstance(r[0], str) and (r[0] == top or r[0].startswith(top + '/'))}
     try:
         have = {(top if r[0] == '.' else f'{top}/{r[0]}'): r[1:] for r in inventory(b)}
-        if not want or not as_recorded(want, have, old_app, previous.get('seals')): return False   # a file changed, added or removed since
-    except OSError: return False
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    copy([b], dst, can_clone(b / 'Contents/Info.plist', dst.parent))
-    return True
+        if want and as_recorded(want, have, old_app, previous.get('seals')): return b
+    except OSError: pass
+    return None
 
 
 def data_shell(dst, name, bundle_id):
@@ -309,6 +306,14 @@ def copy_msl(msl, msls, dst, clone):
     """The shader libraries to dst, msl/<their name> in the app: an NVN game's as the one file dst.img, of what the host reads. Writing it costs the space of a copy, not a clone, as it leaves out the Mac build's sources"""
     if is_chain_library(msl): shader_lib.subset(msl, f'{dst}.img'); return
     dst.mkdir(parents=True); copy(msls, dst, clone)
+
+
+def msl_bytes(msl, msls, clone):
+    return shader_lib.subset_size(msl) if is_chain_library(msl) else copy_bytes(msls, clone)
+
+
+def copy_bytes(files, clone):
+    return 0 if clone else sum(p.lstat().st_size for p in files)
 
 
 def nextendo_inputs(a):
@@ -426,7 +431,7 @@ def pack(a):
     def aside():
         """No failed attempt may leave a valid reuse key: the record goes aside, where only the data bundles are taken from it. A pack that stops before it replaces the app (while it
         signs, for a game of Ocarina of Time's size: minutes) leaves the app the record describes, and the next pack cloned none of its bundles without one: all 36 GB signed again.
-        A bundle is taken from it as from the key, when its inputs are the same and its files are as recorded or have the recorded bytes (data_reused)"""
+        A bundle is taken from it as from the key, when its inputs are the same and its files are as recorded or have the recorded bytes (reusable_data)"""
         with contextlib.suppress(OSError):
             if key_file.is_file(): os.replace(key_file, set_aside)
     try:
@@ -485,12 +490,72 @@ def pack(a):
     code = Path(a.patched) / 'codemods'
     trees = {'romfs': romfs, 'aoc': aoc, 'programs': sib if sib.is_dir() else None, 'code': code if code.is_dir() else None, 'mod_meta': Path(a.game_mods) if a.game_mods else None}
     lists = {'mods': mods, 'msl': msls, 'pso': pso, 'nextendo': variant}
-    clone = {k: bool(d) and can_clone(d, res) for k, d in trees.items()} | {k: bool(ps) and can_clone(ps[0], res) for k, ps in lists.items()}
-    if is_chain_library(msl): clone['msl'] = False   # copy_msl writes it, which the free-space check below counts
-    need = sum(tree_bytes(d) for k, d in trees.items() if d and not clone[k]) + sum(p.stat().st_size for k, ps in lists.items() if not clone[k] for p in ps)
-    if need:
-        free = vol_space.free_bytes(res)
-        if need + (1 << 30) > free: raise SystemExit(f'the app needs {need / 2**30:.1f} GB on the volume of {out.parent} (no APFS clones from the build there) and {free / 2**30:.1f} GB are free')
+    clone = {k: bool(d) and can_clone(d, res) for k, d in trees.items()} | {k: bool(ps) and can_clone(ps[0], res) for k, ps in lists.items() if k != 'msl' or not is_chain_library(msl)}
+    clone.setdefault('msl', False)   # copy_msl rewrites NVN libraries
+    extra = [Path(p) for p in (a.host, a.env_file, a.settings, a.control_nacp, pairs) if p]
+    need = sum(p.stat().st_size for p in extra) + copy_bytes(tables + fonts, False)
+    need += sum(f.stat().st_size for f in services) + sum(copy_bytes(lists[k], clone[k]) for k in ('mods', 'nextendo'))
+    need += sum(tree_bytes(trees[k]) for k in ('code', 'mod_meta') if trees[k] and not clone[k])
+    if a.html and Path(a.html).is_dir(): need += tree_bytes(Path(a.html))
+    msl_dst = res / 'msl' / (a.msl_name or shader_lib.name_of(msl))
+    old_app = out if out.is_dir() else None
+    took = {f[0]: f[1:] for f in inputs['files']}   # what the app's key took of each selected file
+    common = [DATA_FORMAT, a.sign, str(codesign), digest(codesign), a.bundle_id or a.title_id]
+    data, fresh = {}, []   # each data bundle's key, for <out.app>.key; the bundles filled in this pack, signed below
+    def plan_data(name, top, label, inputs, size, fill):
+        nonlocal need
+        b = data_bundle(c, name); link = res / top
+        data[name] = hashlib.sha256(json.dumps(common + [name, top, inputs], sort_keys=True).encode()).hexdigest()
+        old = reusable_data(old_app, previous, name, data[name])
+        cloned = old is not None and can_clone(old / 'Contents/Info.plist', res)
+        need += (0 if cloned else tree_bytes(old)) if old is not None else size()
+        def place():
+            target = b / 'Contents/Resources' / top
+            if old is not None:
+                b.parent.mkdir(parents=True, exist_ok=True)
+                copy([old], b, cloned); step(f'{label} (reused, signed)')
+            else:
+                step(label); data_shell(b, name, a.bundle_id or f'org.nxnative.{a.title_id.lower()}'); target.parent.mkdir(parents=True, exist_ok=True)
+                fill(target); fresh.append(b)
+            link.parent.mkdir(parents=True, exist_ok=True); link.symlink_to(os.path.relpath(target, link.parent))
+        return place
+    image = msls[0] if is_chain_library(msl) and len(msls) == 1 and msls[0].suffix == '.img' else None   # an NVN game's library as one file: the app's is another file, cut from it
+    pmsl_clone = {n: not is_chain_library(pmsl) and can_clone(pmsls[0], res) for n, _, pmsl, _, _, pmsls, _ in programs}
+    read = {}   # its SHA-256, for the record (as_packed): read on a thread of its own while the app's file is written
+    def fill_msl(d):   # the libraries of every program: msl/<library>, msl/p<N>/<library>
+        with concurrent.futures.ThreadPoolExecutor(1) as pool:
+            whole = pool.submit(digest, image) if image else None
+            d.mkdir(parents=True); copy_msl(msl, msls, d / msl_dst.name, clone['msl'])
+            if whole: read[str(image)] = whole.result()
+        for n, _, pmsl, _, _, pmsls, _ in programs:
+            program_dir = d / f'p{n}'
+            program_dir.mkdir()
+            copy_msl(pmsl, pmsls, program_dir / shader_lib.name_of(pmsl), pmsl_clone[n])
+    lib_code = [digest(Path(shader_lib.__file__)), digest(Path(rfs.__file__))]   # what writes a chain library's one file
+    program_lib_keys = [(n, shader_lib.name_of(pmsl), [took[str(p)] for p in pmsls]) for n, _, pmsl, _, _, pmsls, _ in programs]
+    def shader_bytes():
+        return msl_bytes(msl, msls, clone['msl']) + sum(msl_bytes(pmsl, pmsls, pmsl_clone[n]) for n, _, pmsl, _, _, pmsls, _ in programs)
+    place_msl = plan_data('ShaderLibraries', 'msl', 'shader libraries', [lib_code, msl_dst.name, [took[str(p)] for p in msls], program_lib_keys], shader_bytes, fill_msl)
+    place_aoc = plan_data('AddOnContent', 'aoc', 'add-on content', inventory(aoc), lambda: 0 if clone['aoc'] else tree_bytes(aoc), lambda d: copy([aoc], d, clone['aoc'])) if aoc else None
+    place_pso = plan_data('PipelineArchive', 'pso', 'pipeline archive', [took[str(p)] for p in pso], lambda: copy_bytes(pso, clone['pso']),
+                          lambda d: (d.mkdir(parents=True), copy(pso, d, clone['pso']))) if pso else None
+    rtop = 'romfs.img' if romfs.is_file() else 'romfs'
+    place_romfs = plan_data('GameData', rtop, 'game files', romfs_rows, lambda: 0 if clone['romfs'] else tree_bytes(romfs), lambda d: copy([romfs], d, clone['romfs']))
+    place_sib = plan_data('GameDataPrograms', PROGRAM_ROMFS, 'other programs\' game files', inventory(sib), lambda: 0 if clone['programs'] else tree_bytes(sib),
+                          lambda d: copy([sib], d, clone['programs'])) if trees['programs'] else None
+    program_data = {}
+    for n, prom, _, phtml, pmods, _, ptables in programs:
+        mods_clone, rom_clone = can_clone(pmods[0], res), can_clone(prom, res)
+        ptop = f'p{n}/{"romfs.img" if prom.is_file() else "romfs"}'
+        place_rom = plan_data(f'GameData{n}', ptop, f'program {n} game files', inventory(prom),
+                              lambda p=prom, c=rom_clone: 0 if c else tree_bytes(p), lambda d, p=prom, c=rom_clone: copy([p], d, c))
+        program_data[n] = mods_clone, ptop, place_rom
+        need += copy_bytes(pmods, mods_clone) + copy_bytes(ptables, False)
+        if phtml.is_dir(): need += tree_bytes(phtml)
+    # Leave 1 GiB for the generated launcher, icon, signing files and filesystem overhead.
+    free = vol_space.free_bytes(res)
+    if need + (1 << 30) > free:
+        raise SystemExit(f'the app needs {(need + (1 << 30)) / 2**30:.1f} GiB on the volume of {out.parent} (including 1 GiB of headroom) and {free / 2**30:.1f} GiB are free')
     step(f'launcher and host ({"clones" if clone["romfs"] else "copies"} of the game files)')
     build_launcher(mac / EXE, minos, clang, swiftc, sdk)
     shutil.copy(a.host, mac / 'dmhost')   # data and mode, not the build's extended attributes (copy2 would carry them into the app)
@@ -510,48 +575,20 @@ def pack(a):
     if a.env_file: shutil.copyfile(a.env_file, dm / 'env.txt')
     if a.settings: shutil.copyfile(a.settings, dm / 'launcher.json')
     if a.control_nacp: shutil.copyfile(a.control_nacp, res / 'control.nacp')
-    msl_dst = res / 'msl' / (a.msl_name or shader_lib.name_of(msl))
-    old_app = out if out.is_dir() else None
-    took = {f[0]: f[1:] for f in inputs['files']}   # what the app's key took of each selected file
-    common = [DATA_FORMAT, a.sign, str(codesign), digest(codesign), a.bundle_id or a.title_id]
-    data, fresh = {}, []   # each data bundle's key, for <out.app>.key; the bundles filled in this pack, signed below
-    def place(name, top, label, inputs, fill):   # one item's files: into its data bundle (made, or cloned from the old app), linked at Resources/<top>
-        b = data_bundle(c, name); link = res / top
-        data[name] = hashlib.sha256(json.dumps(common + [name, top, inputs], sort_keys=True).encode()).hexdigest()
-        if data_reused(old_app, previous, name, data[name], b): step(f'{label} (reused, signed)')
-        else:
-            step(label); data_shell(b, name, a.bundle_id or f'org.nxnative.{a.title_id.lower()}'); (b / 'Contents/Resources' / top).parent.mkdir(parents=True, exist_ok=True)
-            fill(b / 'Contents/Resources' / top); fresh.append(b)
-        link.parent.mkdir(parents=True, exist_ok=True); link.symlink_to(os.path.relpath(b / 'Contents/Resources' / top, link.parent))
-    image = msls[0] if is_chain_library(msl) and len(msls) == 1 and msls[0].suffix == '.img' else None   # an NVN game's library as one file: the app's is another file, cut from it
-    read = {}   # its SHA-256, for the record (as_packed): read on a thread of its own while the app's file is written
-    def fill_msl(d):   # the libraries of every program: msl/<library>, msl/p<N>/<library>
-        with concurrent.futures.ThreadPoolExecutor(1) as pool:
-            whole = pool.submit(digest, image) if image else None
-            d.mkdir(parents=True); copy_msl(msl, msls, d / msl_dst.name, clone['msl'])
-            if whole: read[str(image)] = whole.result()
-        for n, _, pmsl, _, _, pmsls, _ in programs:
-            program_dir = d / f'p{n}'
-            program_dir.mkdir()
-            copy_msl(pmsl, pmsls, program_dir / shader_lib.name_of(pmsl), can_clone(pmsls[0], res))
-    lib_code = [digest(Path(shader_lib.__file__)), digest(Path(rfs.__file__))]   # what writes a chain library's one file
-    program_lib_keys = [(n, shader_lib.name_of(pmsl), [took[str(p)] for p in pmsls]) for n, _, pmsl, _, _, pmsls, _ in programs]
-    place('ShaderLibraries', 'msl', 'shader libraries', [lib_code, msl_dst.name, [took[str(p)] for p in msls], program_lib_keys], fill_msl)
-    if aoc: place('AddOnContent', 'aoc', 'add-on content', inventory(aoc), lambda d: copy([aoc], d, clone['aoc']))
-    if pso: place('PipelineArchive', 'pso', 'pipeline archive', [took[str(p)] for p in pso], lambda d: (d.mkdir(parents=True), copy(pso, d, clone['pso'])))
-    rtop = 'romfs.img' if romfs.is_file() else 'romfs'
-    place('GameData', rtop, 'game files', romfs_rows, lambda d: copy([romfs], d, clone['romfs']))
+    for place in (place_msl, place_aoc, place_pso, place_romfs):
+        if place: place()
     if a.html and Path(a.html).is_dir(): copy([Path(a.html)], res / 'html', False)   # the offline pages, beside the RomFS where the host looks for them (hle_web.c)
-    if trees['programs']: place('GameDataPrograms', PROGRAM_ROMFS, 'other programs\' game files', inventory(sib), lambda d: copy([sib], d, clone['programs']))
+    if place_sib: place_sib()
     # The other programs: p<N>/ (RomFS in the data bundle GameData<N>, offline pages), msl/p<N>/<library> (in ShaderLibraries), dm/p<N>/ (modules, tables), and the table of them all, which the
     # launcher makes DM_PROGRAMS (launcher.c, hle_oe.c): @R@ Resources, @C@ Contents, @S@ the app's Application Support folder
     if programs:
         rows = ['# The programs of this game (dm/mac/pack_app.py; hle_oe.c DM_PROGRAMS)',
                 '\t'.join(['0', 'exe=@C@/MacOS/dmhost', 'arg=@R@/dm', 'cwd=@S@', f'DM_ROMFS=@R@/{rtop}', 'DM_MSL_DIR=@R@/msl'] + (['DM_NVN_SHMAP=@R@/dm/shader_map.tsv'] if (dm / 'shader_map.tsv').is_file() else []) + (['DM_PSO_BUNDLE=@R@/pso'] if pso else []))]
-        for n, prom, pmsl, phtml, pmods, _, ptables in programs:
-            pdm, ptop = dm / f'p{n}', f'p{n}/{"romfs.img" if prom.is_file() else "romfs"}'
-            pdm.mkdir(parents=True); copy(pmods, pdm, can_clone(pmods[0], res)); copy(ptables, pdm, False)
-            place(f'GameData{n}', ptop, f'program {n} game files', inventory(prom), lambda d, prom=prom: copy([prom], d, can_clone(prom, res)))
+        for n, _, _, phtml, pmods, _, ptables in programs:
+            pdm = dm / f'p{n}'
+            mods_clone, ptop, place_rom = program_data[n]
+            pdm.mkdir(parents=True); copy(pmods, pdm, mods_clone); copy(ptables, pdm, False)
+            place_rom()
             if phtml.is_dir(): copy([phtml], res / f'p{n}/html', False)
             rows.append('\t'.join([n, 'exe=@C@/MacOS/dmhost', f'arg=@R@/dm/p{n}', 'cwd=@S@', f'DM_ROMFS=@R@/{ptop}', f'DM_MSL_DIR=@R@/msl/p{n}', f'DM_NVN_SHMAP=@R@/dm/p{n}/shader_map.tsv', f'DM_PROGRAM={n}']))
         (dm / 'programs.tsv').write_text('\n'.join(rows) + '\n')

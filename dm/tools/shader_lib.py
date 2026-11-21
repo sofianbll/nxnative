@@ -164,9 +164,27 @@ def expand(lib):
     os.rename(work, folder); os.unlink(image)
 
 
+def _app_entries(lib, skip_suffix):
+    skip = tuple(skip_suffix)
+    with romfs.scandir(view(lib)) as entries:
+        for e in entries:
+            n = e.name
+            if n.endswith(APP_SUFFIXES) and n not in APP_LEAVE_OUT and not n.startswith('.') and '.tmp' not in n and not n.endswith(skip):
+                yield e
+
+
 def app_files(lib, skip_suffix=()):
     """{name: path} of what an app carries of the library: what the host reads, and of that what the build wants (build_ipa.sh leaves out the pulling vertex libraries when nothing uses them)"""
-    return {p.name: str(p) for p in view(lib).iterdir() if p.name.endswith(APP_SUFFIXES) and p.name not in APP_LEAVE_OUT and not p.name.startswith('.') and '.tmp' not in p.name and not p.name.endswith(tuple(skip_suffix) or ('\0',))}
+    return {e.name: e.path for e in _app_entries(lib, skip_suffix)}
+
+
+def subset_size(lib, skip_suffix=()):
+    """Bytes written by subset, using only the image index (or the folder's file sizes)."""
+    entries = sorted((e.name.encode(), e.stat().st_size) for e in _app_entries(lib, skip_suffix))
+    off = romfs.HEAD.size
+    for _, size in entries:
+        off += -off % ALIGN + size
+    return off + romfs.ENT.size * (1 + len(entries)) + sum(len(name) for name, _ in entries)
 
 
 def subset(lib, dst, skip_suffix=()):   # → the number of files in the image dst

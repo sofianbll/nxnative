@@ -2,6 +2,7 @@
 # A game's shader libraries as one file (dm/tools/shader_lib.py): the folder and image states, and a read by the host's C reader (dm/gfx/nvn/msl_image.h, dm/host/romfs_image.h).
 import os, subprocess, sys, tempfile, unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/tools'))
@@ -177,6 +178,24 @@ class LeaveOutPulling(Base):
 
 
 class AppSubset(Base):
+    def test_size_reads_only_selected_index_entries(self):
+        self.folder(k_b__metallib=b'lib', k_b__json=b'{}', k_bp__metallib=b'pull')
+        out = self.root / 'app.img'
+        expected = {}
+        for skip in ((), ('_bp.metallib',)):
+            shader_lib.subset(self.lib, out, skip)
+            expected[skip] = out.stat().st_size
+        for excluded in (b'', b'x' * 65536):
+            self.folder(_b_build__json=excluded, k_b__metal=excluded, _b_cas__txt=excluded)
+            for packed in (False, True):
+                if packed: self.pack()
+                for skip in ((), ('_bp.metallib',)):
+                    shader_lib.subset(self.lib, out, skip)
+                    self.assertEqual(out.stat().st_size, expected[skip])
+                    with mock.patch.object(romfs, 'open', side_effect=AssertionError('payload read')):
+                        self.assertEqual(shader_lib.subset_size(self.lib, skip), expected[skip])
+            shader_lib.expand(self.lib)
+
     def test_only_what_the_host_reads(self):
         self.folder(k_b__metallib=b'lib', k_b__json=b'{}', k_b__metal=b'src', k_bp__metallib=b'pull', _b_build__json=b'[]', _b_cas__txt=b'd')
         for packed in (False, True):

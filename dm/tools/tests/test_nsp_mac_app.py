@@ -444,6 +444,30 @@ class PackReuse(unittest.TestCase):
         moved(files()); self.assert_repacked()
         self.assertEqual(signed() & {'GameData.bundle', 'ShaderLibraries.bundle', 'PipelineArchive.bundle', 'AddOnContent.bundle'}, {'GameData.bundle', 'ShaderLibraries.bundle', 'PipelineArchive.bundle', 'AddOnContent.bundle'})
 
+    def test_space_counts_only_copied_payload(self):
+        lib = self.tmp / 'b-0123456789ab.img'
+        shader_lib = pack_app.shader_lib
+        shader_lib.write({'k_b.metallib': b'library', 'k_b.metal': b'x' * 65536, '_b_build.json': b'y' * 65536}, str(lib))
+        self.args.msl = str(lib)
+        expected_img = self.tmp / 'expected.img'
+        shader_lib.write({'k_b.metallib': b'library'}, str(expected_img))
+        inputs = ['dmhost', 'env.txt', 'font/nintendo_ext.ttf', 'romfs/marker', 'aoc/1/data']
+        for folder in ('patched', 'profile', 'pso'):
+            inputs.extend(str(p.relative_to(self.tmp)) for p in (self.tmp / folder).iterdir())
+        need = (1 << 30) + expected_img.stat().st_size + sum((self.tmp / p).stat().st_size for p in inputs)
+        (self.tmp / 'pso/debug.txt').write_bytes(b'z' * 65536)
+        with mock.patch.object(pack_app.vol_space, 'free_bytes', return_value=need - 1):
+            with self.assertRaisesRegex(SystemExit, 'the app needs'): self.pack()
+        with mock.patch.object(pack_app.vol_space, 'free_bytes', return_value=need):
+            self.pack()
+        packed = Path(self.args.out) / 'Contents/Resources/msl' / lib.name
+        self.assertEqual(packed.read_bytes(), expected_img.read_bytes())
+        (self.tmp / 'dmhost').write_bytes(b'new host')
+        self.clone.side_effect = lambda src, dst: src.name == 'Info.plist'
+        with mock.patch.object(shader_lib, 'subset_size', side_effect=AssertionError('reused shader image counted')), \
+             mock.patch.object(pack_app.vol_space, 'free_bytes', return_value=need - expected_img.stat().st_size):
+            self.assertIn('shader libraries (reused, signed)', self.pack())
+
     def test_a_large_input_whose_change_time_alone_moved_is_read_and_taken_as_packed(self):
         # the system moves the change times of the build folder's large files as well (Ocarina of Time's library image, minutes after its build): the RomFS image, the library image
         # and the pipeline archive's files are keyed by their times, so each is read once and compared with the SHA-256 the last pack recorded; other bytes pack its bundle again
@@ -528,7 +552,7 @@ class PackReuse(unittest.TestCase):
         for d in ('p1/patched', 'p1/romfs', 'p1/msl', 'p1/profile', 'p1/html'): (t / d).mkdir(parents=True)
         for n, b in (('patched/main.patched.bin', b'code1'), ('patched/main.fixups.tsv', b'f1'), ('romfs/data', b'game1'), ('msl/k.metallib', b'lib1'), ('profile/shader_map.tsv', b'map1'), ('html/index.html', b'page')):
             (t / 'p1' / n).write_bytes(b)
-        self.args.program = ['\t'.join(['1', *(str(t / 'p1' / d) for d in ('patched', 'romfs', 'msl', 'profile', 'html'))])]
+        self.args.program = ['\t'.join([n, *(str(t / 'p1' / d) for d in ('patched', 'romfs', 'msl', 'profile', 'html'))]) for n in ('1', '2')]
         self.pack()
         res, plugins = Path(self.args.out) / 'Contents/Resources', Path(self.args.out) / 'Contents/PlugIns'
         self.assertTrue((res / 'p1/romfs').is_symlink())
@@ -536,8 +560,9 @@ class PackReuse(unittest.TestCase):
         self.assertEqual((res / 'p1/romfs/data').read_bytes(), b'game1'); self.assertEqual((res / 'p1/html/index.html').read_bytes(), b'page')
         self.assertEqual((plugins / 'ShaderLibraries.bundle/Contents/Resources/msl/p1/msl/k.metallib').read_bytes(), b'lib1')
         self.assertIn('DM_ROMFS=@R@/p1/romfs\tDM_MSL_DIR=@R@/msl/p1', (res / 'dm/programs.tsv').read_text())
+        self.assertIn('DM_ROMFS=@R@/p2/romfs\tDM_MSL_DIR=@R@/msl/p2', (res / 'dm/programs.tsv').read_text())
         (t / 'dmhost').write_bytes(b'other host')
-        self.assertEqual(self.pack().count('(reused, signed)'), 5)
+        self.assertEqual(self.pack().count('(reused, signed)'), 6)
         (t / 'p1/romfs/data').write_bytes(b'game2')
         out = self.pack()
         self.assertIn('step: program 1 game files\n', out); self.assertEqual(out.count('(reused, signed)'), 4)
@@ -1128,8 +1153,10 @@ class App(unittest.TestCase):
         a = types.SimpleNamespace(**vars(self.args)); a.out = str(self.tmp / 'Full.app')
         msls = sum(p.stat().st_size for pat in pack_app.MSL_FILES for p in Path(a.msl).glob(pat) if p.is_file() and p.name != '_b_build.json')
         pso = sum(p.stat().st_size for pat in pack_app.PSO_FILES for p in Path(a.pso).glob(pat))
-        with mock.patch.object(pack_app, 'can_clone', lambda *a: False), mock.patch.object(pack_app, 'tree_bytes', lambda d: 0), \
-             mock.patch.object(shutil, 'disk_usage', lambda p: types.SimpleNamespace(free=(1 << 30) + msls + pso - 1)), mock.patch.object(pack_app.vol_space, 'important_bytes', lambda p: None), contextlib.redirect_stdout(io.StringIO()) as o:
+        _, _, _, tables, pairs, fonts, _, _, _ = pack_app.selected_inputs(a)
+        extra = sum(Path(p).stat().st_size for p in (a.host, a.env_file, a.settings, pairs, *tables, *fonts) if p)
+        with mock.patch.object(pack_app, 'can_clone', side_effect=lambda src, dst: src.is_dir() or src.parent == Path(a.patched)), \
+             mock.patch.object(pack_app.vol_space, 'free_bytes', return_value=(1 << 30) + msls + pso + extra - 1), contextlib.redirect_stdout(io.StringIO()) as o:
             with self.assertRaisesRegex(SystemExit, 'the app needs'): pack_app.pack(a)
         self.assertEqual(o.getvalue(), ''); self.assertFalse(Path(a.out).exists())
 
@@ -1143,7 +1170,8 @@ class App(unittest.TestCase):
         with mock.patch.object(pack_app, 'can_clone', can_clone), mock.patch.object(pack_app, 'tree_bytes', tree_bytes), \
              mock.patch.object(shutil, 'disk_usage', lambda p: types.SimpleNamespace(free=(1 << 30) + lists - 1)), mock.patch.object(pack_app.vol_space, 'important_bytes', lambda p: None), contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(SystemExit, 'the app needs'): pack_app.pack(a)
-        self.assertEqual(len(probed), 5); self.assertEqual(counted, [(self.tmp / 'aoc').resolve()])
+        self.assertEqual({p if p.is_dir() else p.parent for p in probed}, {romfs, self.tmp / 'aoc', self.tmp / 'patched', self.tmp / 'pso'})
+        self.assertEqual(counted, [(self.tmp / 'aoc').resolve()])
 
     def test_copies(self):   # another volume (no APFS clone): plain copies, the same layout; a new app replaces the old one whole
         with mock.patch.object(pack_app, 'can_clone', lambda *a: False), mock.patch.object(pack_app, 'sign', lambda *a: None), mock.patch('sys.stdout'):
