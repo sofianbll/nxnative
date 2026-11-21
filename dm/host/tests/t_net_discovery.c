@@ -228,19 +228,35 @@ static void supplemental_queries(void) {
 }
 // VPN play's adapter choice and mask (net_vpn.h), then the backend over a tunnel through the adapter fixture
 static void vpn(void) {
-    const dm_net_vpn_candidate wifi={htonl(0xc0a80105),htonl(0xffffff00),1,IFF_UP|IFF_BROADCAST,IFRTYPE_FUNCTIONAL_WIFI_INFRA},
-        cell={htonl(0x0a400001),htonl(0xffffffff),2,IFF_UP|IFF_POINTOPOINT,IFRTYPE_FUNCTIONAL_CELLULAR},
-        lo={htonl(INADDR_LOOPBACK),htonl(0xff000000),3,IFF_UP|IFF_LOOPBACK,IFRTYPE_FUNCTIONAL_LOOPBACK},
-        tail={htonl(0x64650203),htonl(0xffffffff),4,IFF_UP|IFF_POINTOPOINT,IFRTYPE_FUNCTIONAL_UNKNOWN},   // Tailscale: 100.101.2.3/32
-        zt={htonl(0x0a931105),htonl(0xffffff00),5,IFF_UP|IFF_POINTOPOINT,IFRTYPE_FUNCTIONAL_UNKNOWN},     // ZeroTier: 10.147.17.5/24
-        down={htonl(0x64650204),htonl(0xffffffff),6,IFF_POINTOPOINT,IFRTYPE_FUNCTIONAL_UNKNOWN},
-        linklocal={htonl(0xa9fe0102),htonl(0xffff0000),7,IFF_UP,IFRTYPE_FUNCTIONAL_UNKNOWN};
+    const dm_net_vpn_candidate wifi={htonl(0xc0a80105),htonl(0xffffff00),1,IFF_UP|IFF_BROADCAST,IFRTYPE_FUNCTIONAL_WIFI_INFRA,""},
+        cell={htonl(0x0a400001),htonl(0xffffffff),2,IFF_UP|IFF_POINTOPOINT,IFRTYPE_FUNCTIONAL_CELLULAR,""},
+        lo={htonl(INADDR_LOOPBACK),htonl(0xff000000),3,IFF_UP|IFF_LOOPBACK,IFRTYPE_FUNCTIONAL_LOOPBACK,"lo0"},
+        tail={htonl(0x64650203),htonl(0xffffffff),4,IFF_UP|IFF_POINTOPOINT,IFRTYPE_FUNCTIONAL_UNKNOWN,"utun0"},   // Tailscale: 100.101.2.3/32
+        zt={htonl(0x0a931105),htonl(0xffffff00),5,IFF_UP|IFF_POINTOPOINT,IFRTYPE_FUNCTIONAL_UNKNOWN,""},         // ZeroTier: 10.147.17.5/24
+        down={htonl(0x64650204),htonl(0xffffffff),6,IFF_POINTOPOINT,IFRTYPE_FUNCTIONAL_UNKNOWN,"utun1"},
+        linklocal={htonl(0xa9fe0102),htonl(0xffff0000),7,IFF_UP,IFRTYPE_FUNCTIONAL_UNKNOWN,"utun2"};
     const dm_net_vpn_candidate one[]={wifi,cell,lo,down,tail},two[]={wifi,tail,zt},none[]={wifi,cell,lo,down,linklocal};
     CHECK(dm_net_vpn_pick(one,5,0)==4);
     CHECK(dm_net_vpn_pick(two,3,0)==DM_NET_VPN_SEVERAL);                    // two tunnels and nothing to tell them apart: never a guess
     CHECK(dm_net_vpn_pick(two,3,zt.address)==2 && dm_net_vpn_pick(two,3,tail.address)==1);   // the route to the host's address settles it
     CHECK(dm_net_vpn_pick(two,3,wifi.address)==DM_NET_VPN_NONE);            // the host is reached over Wi-Fi: not through a VPN
     CHECK(dm_net_vpn_pick(none,5,0)==DM_NET_VPN_NONE);
+    // macOS reported every one of these IPv4 adapters as wired.
+    dm_net_vpn_candidate mac[]={
+        {htonl(0xc0a80102),htonl(0xffffff00),1,0x8863,IFRTYPE_FUNCTIONAL_WIRED,"en7"},
+        {htonl(0xc0a88b03),htonl(0xfffffe00),2,0x8a63,IFRTYPE_FUNCTIONAL_WIRED,"bridge100"},
+        {htonl(0xc0a84001),htonl(0xffffff00),3,0x8a63,IFRTYPE_FUNCTIONAL_WIRED,"bridge101"},
+        {htonl(0x645a8010),htonl(0xfffff000),4,0x8051,IFRTYPE_FUNCTIONAL_WIRED,"utun8"},
+        {htonl(0x0ac7920b),htonl(0xffffff00),5,0x8843,IFRTYPE_FUNCTIONAL_WIRED,"feth3971"},
+        {htonl(0xa9fe7003),htonl(0xffff0000),6,0x8863,IFRTYPE_FUNCTIONAL_WIRED,"en8"},
+    };
+    for (int i=0;i<6;i++) CHECK(dm_net_vpn_eligible(&mac[i])==(i==3||i==4));
+    CHECK(dm_net_vpn_pick(mac,6,0)==DM_NET_VPN_SEVERAL);
+    CHECK(dm_net_vpn_pick(mac+4,1,0)==0);   // net_vpn_interface has filtered by DM_NETWORK_INTERFACE=feth3971
+    mac[3]=mac[5];                         // no Tailscale
+    CHECK(dm_net_vpn_pick(mac,5,0)==4);
+    mac[1].type=IFRTYPE_FUNCTIONAL_UNKNOWN;
+    CHECK(!dm_net_vpn_eligible(&mac[1]));  // a bridge is not a VPN even when ioctl cannot classify it
     CHECK(dm_net_vpn_mask(tail.address,tail.mask)==htonl(0xffc00000) && dm_net_vpn_mask(tail.address,0)==htonl(0xffc00000));
     CHECK(dm_net_vpn_mask(htonl(0x0a000005),htonl(0xfffffffe))==htonl(0xff000000));
     CHECK(dm_net_vpn_mask(htonl(0xac140001),htonl(0xffffffff))==htonl(0xfff00000));

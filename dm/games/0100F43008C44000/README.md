@@ -113,6 +113,7 @@ Each item was found from a red line or a pass dump on the way through the langua
 
 General host changes first needed here; each applies to every game:
 
+- **macOS reports VPN adapters as wired:** [Local play over a VPN](../../../docs/reference/services.md#local-play-over-a-vpn).
 - **Nextendo BCAT startup:** [Online sync fails before the delivery cache opens](../../../docs/reference/nextendo-bcat.md#online-sync-fails-before-the-delivery-cache-opens).
 - **Full stick reach and Home quit for Nintendo-protocol HID clones on Mac:** [Pro Controller clone read as raw HID](../../../docs/reference/services.md#pro-controller-clone-read-as-raw-hid).
 - **Shader extraction reuse after translation-only updates:** [Shader extraction reruns after translation-only updates](../../../docs/reference/shaders.md#shader-extraction-reruns-after-translation-only-updates).

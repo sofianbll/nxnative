@@ -1154,12 +1154,12 @@ static int net_vpn_interface(net_interface *out) {
     uint32_t routed = net_vpn_routed();
     struct ifaddrs *list = NULL; if (getifaddrs(&list)) return -1;
     int control = socket(AF_INET, SOCK_DGRAM, 0);
-    dm_net_vpn_candidate seen[NET_VPN_LIST]; char names[NET_VPN_LIST][IFNAMSIZ]; int count = 0;
+    dm_net_vpn_candidate seen[NET_VPN_LIST]; int count = 0;
     for (struct ifaddrs *p = list; p && count < NET_VPN_LIST; p = p->ifa_next) {
         if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
         unsigned index = if_nametoindex(p->ifa_name);
         if (!index || (wanted && index != wanted)) continue;
-        dm_net_vpn_candidate *c = &seen[count]; strlcpy(names[count], p->ifa_name, IFNAMSIZ); count++;
+        dm_net_vpn_candidate *c = &seen[count++]; strlcpy(c->name, p->ifa_name, sizeof c->name);
         c->address = ((struct sockaddr_in *)p->ifa_addr)->sin_addr.s_addr; c->index = index; c->flags = p->ifa_flags;
         c->mask = p->ifa_netmask && p->ifa_netmask->sa_family == AF_INET ? ((struct sockaddr_in *)p->ifa_netmask)->sin_addr.s_addr : 0;
         c->type = net_functional_type(control, p->ifa_name);
@@ -1172,7 +1172,7 @@ static int net_vpn_interface(net_interface *out) {
         dm_net_vpn_candidate *c = &seen[pick];
         out->address = c->address; out->mask = c->mask; out->index = c->index; out->flags = c->flags; out->local_link = 0;
         inet_ntop(AF_INET, &c->address, address, sizeof address);
-        net_vpn_note(NET_VPN_ADAPTER, "[dm] net: VPN play uses %s %s/%d (told to the game as /%d)%s", names[pick], address, net_prefix(c->mask),
+        net_vpn_note(NET_VPN_ADAPTER, "[dm] net: VPN play uses %s %s/%d (told to the game as /%d)%s", c->name, address, net_prefix(c->mask),
                      net_prefix(dm_net_vpn_mask(c->address, c->mask)), routed ? ", the route to the host's address" : "");
         return 0;
     }
@@ -1180,7 +1180,7 @@ static int net_vpn_interface(net_interface *out) {
         char found[384] = ""; size_t used = 0;
         for (int i = 0; i < count && used < sizeof found; i++) if (dm_net_vpn_eligible(&seen[i])) {
             inet_ntop(AF_INET, &seen[i].address, address, sizeof address);
-            int n = snprintf(found + used, sizeof found - used, "%s%s %s", used ? ", " : "", names[i], address); if (n > 0) used += (size_t)n;
+            int n = snprintf(found + used, sizeof found - used, "%s%s %s", used ? ", " : "", seen[i].name, address); if (n > 0) used += (size_t)n;
         }
         net_vpn_note(NET_VPN_ADAPTER, "[dm] [RED] net: VPN play: several adapters could be the VPN (%s). Set DM_NETWORK_INTERFACE to the VPN's, or "
                      "DM_NET_DISCOVERY_PEER to the host's VPN address", found);

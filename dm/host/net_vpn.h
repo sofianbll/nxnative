@@ -4,17 +4,23 @@
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <stdint.h>
+#include <string.h>
 
-typedef struct { uint32_t address, mask; unsigned index, flags, type; } dm_net_vpn_candidate;   // type: the SIOCGIFFUNCTIONALTYPE answer
+typedef struct { uint32_t address, mask; unsigned index, flags, type; char name[IFNAMSIZ]; } dm_net_vpn_candidate;   // type: the SIOCGIFFUNCTIONALTYPE answer
 
-// A VPN adapter is up, IPv4 and not loopback or link-local (169.254/16), and its functional type is none of the physical links. iOS names VPN tunnels
-// utunN, but names are not API (TN3179) and the type of a tunnel is not documented, so this excludes what is known not to be one rather than matching a VPN.
-// Point-to-point is allowed: tunnels are.
 static inline int dm_net_vpn_eligible(const dm_net_vpn_candidate *c) {
     uint32_t a = ntohl(c->address);
-    if (!(c->flags & IFF_UP) || (c->flags & IFF_LOOPBACK) || !a || (a & 0xffff0000u) == 0xa9fe0000u) return 0;
+    if (!(c->flags & IFF_UP) || (c->flags & IFF_LOOPBACK) || c->type == IFRTYPE_FUNCTIONAL_LOOPBACK ||
+        !a || (a & 0xffff0000u) == 0xa9fe0000u) return 0;
+    // shortcut: Darwin can report tunnels as wired; use name prefixes until a reliable tunnel identity is available.
+    static const char *const vpn[] = {"utun", "feth", "zt", "ipsec", "ppp", "tun", "tap", "wg"};
+    static const char *const local[] = {"bridge", "vmenet", "ap", "awdl", "llw", "anpi", "en"};
+    for (unsigned i = 0; i < sizeof vpn / sizeof *vpn; i++)
+        if (!strncmp(c->name, vpn[i], strlen(vpn[i]))) return 1;
+    for (unsigned i = 0; i < sizeof local / sizeof *local; i++)
+        if (!strncmp(c->name, local[i], strlen(local[i]))) return 0;
     switch (c->type) {
-    case IFRTYPE_FUNCTIONAL_LOOPBACK: case IFRTYPE_FUNCTIONAL_WIRED: case IFRTYPE_FUNCTIONAL_WIFI_INFRA: case IFRTYPE_FUNCTIONAL_WIFI_AWDL: case IFRTYPE_FUNCTIONAL_CELLULAR:
+    case IFRTYPE_FUNCTIONAL_WIRED: case IFRTYPE_FUNCTIONAL_WIFI_INFRA: case IFRTYPE_FUNCTIONAL_WIFI_AWDL: case IFRTYPE_FUNCTIONAL_CELLULAR:
 #ifdef IFRTYPE_FUNCTIONAL_INTCOPROC
     case IFRTYPE_FUNCTIONAL_INTCOPROC:
 #endif
