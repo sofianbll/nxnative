@@ -1242,7 +1242,7 @@ class Script(unittest.TestCase):
              mock.patch.object(nsp, 'mac_gpu_arch', lambda *a: 'applegpu_g14s'), mock.patch.object(nsp, 'say', self.said.append):
             nsp.mac_app(sys.executable, REPO, out, 0x01008CF01BAAC000, tmp, tmp / 'ex', tmp / 'patched', tmp / 'dmhost', tmp / 'font', tmp / 'shader/cache' if gfx == 'nvn' else tmp / 'shader',
                         kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), kw.get('env', {}), tmp,
-                        gpus=kw.get('gpus', ''), prebake=kw.get('prebake', False), routes=kw.get('routes'))
+                        gpus=kw.get('gpus', ''), prebake=kw.get('prebake', False), routes=kw.get('routes'), runtime_python=kw.get('runtime_python'))
         self.pso_cmd = next((c for c in ran if len(c) > 1 and c[1].endswith('pso_offline.py')), None)   # before the packer
         self.settings_cmd = next(c for c in ran if len(c) > 1 and c[1].endswith('dm/games/settings.py'))
         c = ran[-1]; return {c[i]: c[i + 1] for i in range(3, len(c) - 1) if c[i].startswith('--')}, tmp
@@ -1267,8 +1267,10 @@ class Script(unittest.TestCase):
     def test_nextendo_pack_command(self):
         routes = Path('/build/nextendo-services/routes.tsv')
         env = {'DM_NEXTENDO': '1', 'DM_NEXTENDO_CLIENT_ID': 'arcane.public'}
-        o, _ = self.pack_cmd('nvn', env=env, routes=routes)
+        runtime = Path('/build/portable-python')
+        o, _ = self.pack_cmd('nvn', env=env, routes=routes, runtime_python=runtime)
         self.assertEqual((o['--nextendo-services'], o['--nextendo-client-id']), (str(routes.parent), 'arcane.public'))
+        self.assertEqual(o['--runtime-python'], str(runtime))
         self.assertEqual(self.settings_env['DM_NEXTENDO'], '1')
         o, _ = self.pack_cmd('nvn', env=env)
         self.assertNotIn('--nextendo-services', o); self.assertNotIn('--nextendo-client-id', o)
@@ -1593,6 +1595,13 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
         stamp = self.tmp / 'run/pso_archive_partial/prebuilt.tsv'; stamp.parent.mkdir(parents=True); stamp.write_text('chain\n')
         cmd = self.run_cmd(partial=True)
         self.assertTrue(cmd.endswith(f'2>&1 | tee {self.tmp}/run/host.log')); self.assertIn(f'DM_PSO_ARCHIVE={self.tmp}/run/pso_archive_partial', cmd); self.assertFalse(stamp.exists())
+
+    def test_run_command_passes_the_runtime_compiler(self):
+        python = self.tmp / 'python environment' / 'bin/python3'
+        compiler = self.tmp / 'source tree' / 'dmsh_live.py'
+        self.assertNotIn('DM_NVN_RUNTIME_COMPILER', self.run_cmd())
+        self.assertIn(f"DM_NVN_RUNTIME_PYTHON='{python}'", self.run_cmd(nvn_runtime=(python, compiler)))
+        self.assertIn(f"DM_NVN_RUNTIME_COMPILER='{compiler}'", self.run_cmd(nvn_runtime=(python, compiler)))
 
     def test_pack_takes_the_partial_folder(self):   # the app and its pipeline archive read b-<chain> of the folder build_shaders returned
         ran = []
