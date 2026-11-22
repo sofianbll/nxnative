@@ -9,6 +9,8 @@
 #include <unistd.h>
 static int checks,failures,requests; static unsigned generation=1,response_status=200;
 static BOOL linked=YES; static NSString *reply,*posted_detail;
+static NSDictionary *presence_posted;
+static unsigned presence_requests;
 static dm_net_mode_t mode=DM_NET_AUTO;
 static uint8_t uid[16]={1};
 static uint32_t constructor[]={0x52804002,0x2a1f03e1,0x14000000};
@@ -37,8 +39,9 @@ static bool transport(const char *url,const char *method,const char *auth,const 
     if(strstr(url,"/api/presence")){
         CHECK(!strcmp(method,"POST")&&body&&body_size);
         NSDictionary *posted=[NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:body length:body_size] options:0 error:nil];
-        CHECK([posted[@"app_id"] isEqual:@"0100152000022000"]&&[posted[@"status"] unsignedIntValue]<=2);
-        posted_detail=posted[@"app_detail"];
+        unsigned state=[posted[@"status"] unsignedIntValue];
+        CHECK([posted[@"app_id"] isEqual:state?@"0100152000022000":@""]&&state<=2);
+        posted_detail=posted[@"app_detail"];presence_posted=posted;presence_requests++;
         memcpy(output,"{}",2);*size=2;*status=response_status;return true;
     }
     CHECK(!strcmp(method,"GET"));
@@ -94,15 +97,38 @@ int main(void){@autoreleasepool{
     uint64_t nsa=0;CHECK(!dm_nextendo_api_baas_id(&nsa)&&nsa==0xabcdef0000001234ull);
     uint8_t own[0xe0+16];memset(own,0,sizeof own);own[0xe0]=0xa5;
     CHECK(!dm_nextendo_presence_initialize(own,uid)&&!memcmp(own,uid,16)&&own[0xe0]==0xa5);
+    mode=DM_NET_NEXTENDO;
+    setenv("DM_NEXTENDO_PRESENCE","0",1);
+    dm_nextendo_presence_start();CHECK(!dm_nextendo_presence_commit(own));CHECK(!dm_nextendo_social_publish(2,NULL,0));
+    dm_nextendo_social_tick();CHECK(presence_requests==0);
+    unsetenv("DM_NEXTENDO_PRESENCE");
+    dm_nextendo_presence_start();dm_nextendo_social_flush();
+    CHECK(presence_requests==1&&[presence_posted[@"status"] isEqual:@2]&&[presence_posted[@"app_field"] isEqual:@""]);
+    dm_nextendo_presence_start();dm_nextendo_social_flush();CHECK(presence_requests==1);
+    CHECK(dm_nextendo_social_tick()==45&&presence_requests==2);
+    CHECK(dm_nextendo_social_tick()==45&&presence_requests==3);
     own[0x20]=1;own[0x21]=2;CHECK(!dm_nextendo_presence_commit(own));dm_nextendo_social_flush();CHECK([posted_detail isEqual:@""]);
     // the game's description: key and value strings in turn, the description under sys_description
     static const char described[]="mode\0race\0sys_description\0Grand Prix";memset(own+0x20,0,192);memcpy(own+0x20,described,sizeof described);
     CHECK(!dm_nextendo_presence_commit(own));dm_nextendo_social_flush();CHECK([posted_detail isEqual:@"Grand Prix"]);
+    NSDictionary *committed=presence_posted;unsigned sent=presence_requests;
+    CHECK(!dm_nextendo_social_publish(2,NULL,0));   // DeclareOpenOnlinePlaySession
+    dm_nextendo_presence_start();dm_nextendo_social_flush();
+    CHECK(presence_requests==sent+1&&[presence_posted isEqual:committed]);
+    dm_nextendo_social_tick();CHECK(presence_requests==sent+2&&[presence_posted isEqual:committed]);
+    CHECK(!dm_nextendo_social_publish(1,NULL,0));   // DeclareCloseOnlinePlaySession
+    dm_nextendo_social_flush();CHECK([presence_posted[@"status"] isEqual:@2]&&[presence_posted[@"app_field"] isEqual:@""]);
     memset(own+0x20,'x',192);CHECK(!dm_nextendo_presence_commit(own));dm_nextendo_social_flush();CHECK([posted_detail isEqual:@""]);   // a field that never ends its strings
     memset(own+0x20,0,192);
     // a refused upload is not the game's failure (a console's friends service uploads in the background), and the next publish is still sent
     response_status=503;CHECK(!dm_nextendo_presence_commit(own));dm_nextendo_social_flush();response_status=200;
     memcpy(own+0x20,described,sizeof described);posted_detail=nil;CHECK(!dm_nextendo_presence_commit(own));dm_nextendo_social_flush();CHECK([posted_detail isEqual:@"Grand Prix"]);
+    sent=presence_requests;response_status=503;dm_nextendo_social_tick();response_status=200;dm_nextendo_social_tick();
+    CHECK(presence_requests==sent+2&&[posted_detail isEqual:@"Grand Prix"]);
+    sent=presence_requests;dm_nextendo_presence_stop();
+    CHECK(presence_requests==sent+1&&[presence_posted[@"status"] isEqual:@0]&&[presence_posted[@"app_field"] isEqual:@""]);
+    dm_nextendo_presence_start();CHECK(!dm_nextendo_presence_commit(own));dm_nextendo_social_tick();
+    CHECK(presence_requests==sent+1);
     memset(own+0x20,0,192);
     presence_constructor[0]=0;CHECK(dm_nextendo_presence_initialize(own,uid)!=0);presence_constructor[0]=0x52801c02;
     mode=DM_NET_OFFLINE;CHECK(dm_nextendo_presence_commit(own)!=0);mode=DM_NET_AUTO;

@@ -1282,6 +1282,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `make -C dm/host/tests GAME=<id> nextendo-social` (the description reaches the server after the queue drains, a refused upload is not the game's failure and the next publish is still sent).
 - **Found on:** Mario Kart 8 Deluxe 4.0.1 and Super Mario Bros. Wonder 1.2.1 on an iPhone, 2026-11-14: a short delay between online menus on the first visits. Found by reading the code; the frame times in the log had no stall.
 
+### Nextendo friends see a running game as offline
+
+- **Symptom:** the game signs in to Nextendo, but friends never see it running.
+- **Cause:** only the guest's `nn::friends` presence updates started the HTTPS heartbeat. Pokémon Legends: Z-A's patched main does not import `nn::friends`.
+- **Fix:** on the first game credential in explicit Nextendo mode, queue `status: 2` with the game's title ID. The same queue resends the latest presence every 45 s and keeps the SDK application field when `DeclareOpenOnlinePlaySession` supplies none. Closing that SDK session clears the join data but keeps the running title. Clean host exits stop the heartbeat and try the [documented `status: 0`](https://wiki.nextendo.network/developers#sec-presence); if the post cannot finish before exit, the server expires the last update after 90 s. `DM_NEXTENDO_PRESENCE=0` disables uploads.
+- **Check:** `make -C dm/host/tests GAME=<id> nextendo-social` (synthetic HTTP and timer ticks). On a game run, look for `nextendo: presence published (in game <title ID>)`.
+- **Found on:** [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md#found-on-this-game) on the Mac; the fix has not been tested in a live session.
+
 ### An online race ends in a communication error with nothing in the log
 
 - **Symptom:** in Nextendo mode, Mario Kart 8 Deluxe finds a Worldwide race and starts it, then shows a communication error during the race (on the second lap here) and returns to the menu. The log has no error line from the host.

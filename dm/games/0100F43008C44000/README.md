@@ -116,6 +116,7 @@ General host changes first needed here; each applies to every game:
 
 - **macOS reports VPN adapters as wired:** [Local play over a VPN](../../../docs/reference/services.md#local-play-over-a-vpn).
 - **Nextendo BCAT startup:** [Online sync fails before the delivery cache opens](../../../docs/reference/nextendo-bcat.md#online-sync-fails-before-the-delivery-cache-opens).
+- **Nextendo presence:** [Nextendo friends see a running game as offline](../../../docs/reference/services.md#nextendo-friends-see-a-running-game-as-offline).
 - **Full stick reach and Home quit for Nintendo-protocol HID clones on Mac:** [Pro Controller clone read as raw HID](../../../docs/reference/services.md#pro-controller-clone-read-as-raw-hid).
 - **Shader extraction reuse after translation-only updates:** [Shader extraction reruns after translation-only updates](../../../docs/reference/shaders.md#shader-extraction-reruns-after-translation-only-updates).
 - **Offline pipeline archive reuse across chains:** [Offline pipeline archive rebuilt after a chain-only update](../../../docs/reference/shaders.md#offline-pipeline-archive-rebuilt-after-a-chain-only-update).

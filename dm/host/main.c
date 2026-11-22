@@ -2,6 +2,7 @@
 #include "dm.h"
 #include "front.h"
 #include "nextendo_bcat.h"
+#include "nextendo_social.h"
 #include "../gfx/nvn/dmsh_chain.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <stdatomic.h>
@@ -42,6 +43,7 @@ static void guest_main(void) {
     { void dm_oodle_serve_maybe(int); dm_oodle_serve_maybe(1); }   // DM_OODLE_SERVE with a decoder that needs the game's malloc (LZ5, hle_oodle.c)
     { void dm_oodle_job_maybe(void); dm_oodle_job_maybe(); }   // DM_OODLE_JOB: decode a job file with the game's own Oodle and exit (hle_oodle.c, for the offline shader tools)
     LOG(">>> nnMain"); ((fn0)req("nnMain"))();
+    dm_nextendo_presence_stop();
     LOG("nnMain returned");
 }
 
