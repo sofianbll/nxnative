@@ -79,27 +79,62 @@ static NSTextField *ov_label(NSView *parent, NSRect frame, NSString *text, CGFlo
     label.frame = frame; label.font = [NSFont systemFontOfSize:size weight:weight]; label.textColor = ink;
     label.lineBreakMode = NSLineBreakByTruncatingTail; label.alignment = alignment; [parent addSubview:label]; return label;
 }
-static NSTextField *ov_fps_label(NSString *text) {
-    NSTextField *label = [NSTextField labelWithString:text];
-    label.alignment = NSTextAlignmentCenter; label.drawsBackground = YES;
-    label.backgroundColor = ov_color(0x14181fbf); label.textColor = NSColor.whiteColor;
-    label.wantsLayer = YES; label.layer.masksToBounds = YES; return label;
+@interface DmFrameGraph : NSView
+@property (copy) NSArray<NSNumber *> *samples;
+@end
+@implementation DmFrameGraph
+- (void)drawRect:(NSRect)dirty {
+    (void)dirty;
+    NSRect area=NSInsetRect(self.bounds,1,1);
+    [ov_color(0xffffff25) setStroke];
+    [NSBezierPath strokeLineFromPoint:NSMakePoint(NSMinX(area),NSMinY(area)) toPoint:NSMakePoint(NSMaxX(area),NSMinY(area))];
+    if (self.samples.count<2) return;
+    NSBezierPath *line=[NSBezierPath bezierPath]; line.lineWidth=1.25;
+    for (NSUInteger i=0;i<self.samples.count;i++) {
+        CGFloat f=fmax(0,fmin(1,self.samples[i].doubleValue/40));
+        NSPoint p=NSMakePoint(NSMinX(area)+NSWidth(area)*i/(self.samples.count-1),NSMinY(area)+NSHeight(area)*f);
+        if (i) [line lineToPoint:p]; else [line moveToPoint:p];
+    }
+    [ov_color(0x9ccbffff) setStroke]; [line stroke];
 }
-static NSString *ov_fps_text(int preset, double fps, double ms, NSString *history) {
-    if (fps <= 0) return @"— FPS";
-    if (preset == 1) return [NSString stringWithFormat:@"%.0f FPS",fps];
-    if (preset == 3 && history.length) return [NSString stringWithFormat:@"%.0f FPS  ·  %.1f ms  %@",fps,ms,history];
-    return [NSString stringWithFormat:@"%.0f FPS  ·  %.1f ms",fps,ms];
+@end
+@interface DmFPSView : NSView
+@property (strong) NSTextField *rate, *interval;
+@property (strong) DmFrameGraph *graph;
+@end
+@implementation DmFPSView
+- (NSView *)hitTest:(NSPoint)p { (void)p; return nil; }
+@end
+static DmFPSView *ov_fps_view(void) {
+    DmFPSView *v=[DmFPSView new]; v.wantsLayer=YES; v.layer.masksToBounds=YES;
+    v.layer.backgroundColor=ov_color(0x14181fe0).CGColor;
+    v.rate=ov_label(v,NSZeroRect,@"— FPS",17,NSFontWeightSemibold,NSColor.whiteColor,NSTextAlignmentRight);
+    v.interval=ov_label(v,NSZeroRect,@"— ms",17,NSFontWeightRegular,ov_color(0xffffffd9),NSTextAlignmentRight);
+    v.graph=[DmFrameGraph new]; [v addSubview:v.graph];
+    return v;
 }
-static void ov_fps_layout(NSTextField *label, NSRect bounds, ov_hud hud) {
-    CGFloat k = fmax(.55, fmin(NSWidth(bounds)/1920, NSHeight(bounds)/1080));
-    label.font = [NSFont monospacedDigitSystemFontOfSize:(15 + 5*hud.size)*k weight:NSFontWeightSemibold];
-    CGFloat w = label.intrinsicContentSize.width + 12*k, h = (28 + 5*hud.size)*k;
-    CGFloat x = hud.position & 1 ? NSWidth(bounds)-64*k-w : 64*k;
-    CGFloat y = hud.position & 2 ? 40*k : NSHeight(bounds)-40*k-h;
-    label.frame = NSMakeRect(x,y,w,h);
-    label.layer.cornerRadius = 8*k;
-    label.alphaValue = ov_hud_opacity[hud.opacity]/100.0;
+static void ov_fps_sample(DmFPSView *v,double fps,double ms,NSArray<NSNumber *> *history, BOOL fr) {
+    v.rate.stringValue=fps>0 ? [NSString stringWithFormat:@"%.0f FPS",fps] : @"— FPS";
+    NSString *time=ms>0 ? [NSString stringWithFormat:@"%.1f ms",ms] : @"— ms";
+    v.interval.stringValue=fr ? [time stringByReplacingOccurrencesOfString:@"." withString:@","] : time;
+    v.graph.samples=history; [v.graph setNeedsDisplay:YES];
+}
+static void ov_fps_layout(DmFPSView *v, NSRect bounds, ov_hud hud) {
+    const CGFloat scales[]={1,1.22,1.48};
+    CGFloat k=fmax(.38,fmin(NSWidth(bounds)/1920,NSHeight(bounds)/1080))*scales[hud.size];
+    BOOL second=hud.preset>=2, graph=hud.preset>=3, right=(hud.position&1)!=0;
+    CGFloat pad=10*k, row=20*k, gap=3*k, plot=21*k, margin=40*k/scales[hud.size];
+    CGFloat w=(graph ? 128 : second ? 106 : 92)*k, h=2*pad+row+(second ? row+gap : 0)+(graph ? gap+plot : 0);
+    CGFloat x=right ? NSWidth(bounds)-margin*1.6-w : margin*1.6;
+    CGFloat y=hud.position&2 ? margin : NSHeight(bounds)-margin-h;
+    v.frame=NSMakeRect(x,y,w,h); v.layer.cornerRadius=10*k; v.alphaValue=ov_hud_opacity[hud.opacity]/100.0;
+    v.rate.frame=NSMakeRect(pad,h-pad-row,w-2*pad,row);
+    v.interval.frame=NSOffsetRect(v.rate.frame,0,-row-gap); v.interval.hidden=!second;
+    for (NSTextField *t in @[v.rate,v.interval]) {
+        t.font=[NSFont monospacedDigitSystemFontOfSize:17*k weight:t==v.rate ? NSFontWeightSemibold : NSFontWeightRegular];
+        t.alignment=right ? NSTextAlignmentRight : NSTextAlignmentLeft;
+    }
+    v.graph.frame=NSMakeRect(pad,pad,w-2*pad,plot); v.graph.hidden=!graph;
 }
 static NSButton *ov_button(DmOverlay *v, NSRect frame, NSString *text, NSString *symbol, CGFloat size, NSColor *ink,
                       NSColor *fill, NSColor *stroke, CGFloat radius, CGFloat line, NSInteger action, NSInteger index, BOOL focus) {
@@ -216,9 +251,11 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
     NSColor *ink = theme[@"ink"], *focus = theme[@"focus"], *on = theme[@"onFocus"], *surface = theme[@"surface"];
     NSColor *muted = [ink colorWithAlphaComponent:ink.alphaComponent * .7], *border = [ink colorWithAlphaComponent:.22];
     NSColor *soft = [ink colorWithAlphaComponent:.10], *green = ov_color(0x3ddc84ff);
+    NSColor *rowGlass=[surface colorWithAlphaComponent:surface.alphaComponent*.74];
 #define R(x,y,w,h) ov_rect(l,x,y,w,h)
-#define C(x,y,w,h,text,size,weight,color) ov_label(v,R(x,y,w,h),text,size*k,weight,color,NSTextAlignmentCenter)
-#define L(x,y,w,h,text,size,weight,color) ov_label(v,R(x,y,w,h),text,size*k,weight,color,NSTextAlignmentLeft)
+#define TYPE(size) ((size)>=32 ? 44 : (size)>=19 ? 21 : (size)>=14 ? 17 : 12)
+#define C(x,y,w,h,text,size,weight,color) ov_label(v,R(x,y,w,h),text,TYPE(size)*k,weight,color,NSTextAlignmentCenter)
+#define L(x,y,w,h,text,size,weight,color) ov_label(v,R(x,y,w,h),text,TYPE(size)*k,weight,color,NSTextAlignmentLeft)
 #define T(s) ov_text(fr, s)
     NSString *quit = d[@"quitLabel"] ?: T(@"Quit"), *resume = d[@"resume"] ?: T(@"Resume");
     NSArray *items = ov_items(fr), *symbols = @[@"speedometer", @"speaker.wave.2.fill", @"gamecontroller.fill", @"person.3.fill", @"power"];
@@ -233,9 +270,13 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
             ov_button(v, R(x-radius,y-radius,2*radius,2*radius), label, symbols[i], (i == HQ_NETWORK ? 26 : 31)*k, ink,
                       selected ? soft : nil, selected ? focus : nil, radius*k, selected ? 3*k : 0, OV_MAIN, i, selected);
             if (selected) {
-                C(x-150,y-102,300,25,label,18,NSFontWeightSemibold,ink);
                 NSString *detail = i == HQ_HUD ? ov_presets(fr)[[d[@"preset"] intValue]] : i == HQ_VOLUME ? d[@"volume"] : nil;
-                C(x-150,y-77,300,22,detail,14,NSFontWeightRegular,muted);
+                NSTextField *title=C(x-150,y-(detail ? 99 : 77),300,23,label,18,NSFontWeightSemibold,ink);
+                NSTextField *sub=C(x-150,y-75,300,21,detail,17,NSFontWeightRegular,[ink colorWithAlphaComponent:.6]);
+                for (NSTextField *t in @[title,sub]) {
+                    NSShadow *shadow=[NSShadow new]; shadow.shadowBlurRadius=8*k; shadow.shadowColor=[NSColor colorWithWhite:0 alpha:.8];
+                    t.shadow=shadow;
+                }
             }
         }
         NSString *status = d[@"network"] ? [NSString stringWithFormat:@"%@ · %@ %@", d[@"session"], @"●", d[@"network"]] : d[@"session"];
@@ -255,7 +296,7 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
         for (NSNumber *tab in tabs) {
             int i = tab.intValue;
             BOOL selected = i == q.tab;
-            ov_button(v,R(tx,36,widths[i],38),labels[i],nil,20*k,selected ? on : ink,
+            ov_button(v,R(tx,36,widths[i],38),labels[i],nil,21*k,selected ? on : ink,
                       selected ? focus : nil,nil,19*k,0,OV_TAB,i,selected);
             tx += widths[i] + 6;
         }
@@ -264,7 +305,7 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
             ov_box(v,R(x,45,36,20),ink,nil,6*k,0);
             C(x,46,36,18,i ? @"RB" : @"LB",12,NSFontWeightSemibold,on);
         }
-        ov_label(v,R(l.w-264,37,200,37),d[@"clock"],28*k,NSFontWeightLight,ink,NSTextAlignmentRight);
+        ov_label(v,R(l.w-264,44,200,30),d[@"clock"],21*k,NSFontWeightLight,ink,NSTextAlignmentRight);
         CGFloat x = cx - 848, y = (l.h-1080)/2 + 320;
         NSDictionary *tabData = d[@"social"][@(q.tab)];
         CGFloat tabWidth=1040;
@@ -274,17 +315,17 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
             NSString *name=ov_string(tabData[@"name"]);
             L(x,y,l.w-x-112,65,name ?: T(@"Profile unavailable"),44,NSFontWeightRegular,ink);
             if ([d[@"canArcane"] boolValue] && name)
-                ov_button(v,R(x,y+176,245,56),T(@"View in Arcane"),nil,21*k,on,focus,border,28*k,k,OV_MAIN,0,YES);
+                ov_button(v,R(x,y+81,216,54),T(@"View in Arcane"),nil,21*k,on,focus,border,27*k,k,OV_MAIN,0,YES);
             NSArray *keys=@[T(@"Nextendo account"),T(@"Presence"),T(@"Play time"),T(@"This week")];
             NSArray *values=@[ov_string(tabData[@"nextendo"]) ?: @"—",ov_presence(fr,tabData),ov_string(d[@"total"]) ?: @"—",ov_string(tabData[@"week"]) ?: @""];
             CGFloat fx=x;
             for (int i=0;i<4;i++) {
                 if (![values[i] length]) continue;
                 CGFloat col=i==1 ? 272 : 180;
-                if (i) ov_box(v,R(fx-20,y+294,1,46),border,nil,0,0);
-                L(fx,y+294,col-30,19,[keys[i] uppercaseString],12,NSFontWeightSemibold,muted);
-                if (i==1) ov_box(v,R(fx,y+324,8,8),ov_online(tabData) ? green : muted,nil,4*k,0);
-                L(fx+(i==1 ? 16 : 0),y+314,col-34,29,values[i],21,NSFontWeightSemibold,ink);
+                if (i) ov_box(v,R(fx-20,y+174,1,46),border,nil,0,0);
+                L(fx,y+174,col-30,19,[keys[i] uppercaseString],12,NSFontWeightSemibold,muted);
+                if (i==1) ov_box(v,R(fx,y+204,8,8),ov_online(tabData) ? green : muted,nil,4*k,0);
+                L(fx+(i==1 ? 16 : 0),y+194,col-34,29,values[i],21,NSFontWeightSemibold,ink);
                 fx+=col;
             }
         } else if (q.tab == OV_FRIENDS) {
@@ -298,12 +339,12 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
                 ov_box(v,R(x,y,tabWidth,78),surface,border,16*k,k);
                 L(x+24,y+24,tabWidth-48,30,summary,21,NSFontWeightRegular,ink);
             } else {
-                ov_label(v,R(x+600,y-57,tabWidth-600,32),summary,20*k,NSFontWeightRegular,muted,NSTextAlignmentRight);
+                ov_label(v,R(x+600,y-57,tabWidth-600,32),summary,21*k,NSFontWeightRegular,muted,NSTextAlignmentRight);
                 NSInteger first=MAX(0,q.selection-4);
                 for (NSInteger i=first;i<MIN((NSInteger)friends.count,first+5);i++) {
                     NSDictionary *person=friends[i]; BOOL selected=q.selection==i;
-                    CGFloat yy=y+(i-first)*92;
-                    ov_box(v,R(x,yy,tabWidth,80),surface,selected ? focus : border,16*k,(selected ? 2 : 1)*k);
+                    CGFloat yy=y+(i-first)*88;
+                    ov_box(v,R(x,yy,tabWidth,80),rowGlass,selected ? focus : nil,16*k,2*k);
                     ov_avatar(v,R(x+18,yy+13,54,54),person,surface,ink,k);
                     L(x+92,yy+13,tabWidth-122,30,ov_string(person[@"name"]),23,NSFontWeightSemibold,ink);
                     ov_box(v,R(x+93,yy+52,8,8),ov_online(person) ? green : muted,nil,4*k,0);
@@ -313,6 +354,7 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
                 }
             }
         } else if (q.tab == OV_ACHIEVEMENTS) {
+            tabWidth=l.w-2*x;
             NSInteger total=ov_amount(tabData[@"total"],100000), done=ov_amount(tabData[@"unlocked"],total);
             NSArray *recent=[tabData[@"recent"] isKindOfClass:NSArray.class] ? tabData[@"recent"] : @[];
             L(x,y-74,tabWidth,64,labels[q.tab],44,NSFontWeightRegular,ink);
@@ -323,17 +365,24 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
             ov_box(v,R(x+24,y+75,tabWidth-48,8),soft,nil,4*k,0);
             if (done) ov_box(v,R(x+24,y+75,(tabWidth-48)*(CGFloat)done/total,8),focus,nil,4*k,0);
             L(x,y+149,tabWidth,32,T(@"Recently unlocked"),23,NSFontWeightSemibold,ink);
-            int tile=0;
+            NSMutableArray<NSString *> *titles=[NSMutableArray array];
             for (id item in recent) {
-                if (tile==4) break;
-                NSString *title=ov_string(item); if (!title) continue;
-                CGFloat xx=x+tile++*264;
-                ov_box(v,R(xx,y+195,248,156),surface,border,16*k,k);
-                NSImageView *icon=hq_glyph(@"trophy.fill",@"star",25*k,focus); icon.frame=R(xx+22,y+217,33,33);
-                [v addSubview:icon];
-                L(xx+22,y+273,204,45,title,19,NSFontWeightSemibold,ink);
+                if (titles.count==4) break;
+                NSString *title=ov_string(item); if (title) [titles addObject:title];
             }
-            if (!tile) {
+            CGFloat tileWidth=titles.count ? (tabWidth-16*(MAX(3,titles.count)-1))/MAX(3,titles.count) : 0;
+            for (NSUInteger tile=0;tile<titles.count;tile++) {
+                CGFloat xx=x+tile*(tileWidth+16);
+                ov_box(v,R(xx,y+195,tileWidth,156),rowGlass,border,16*k,k);
+                ov_box(v,R(xx+24,y+226,76,76),ov_color(0xe5b96c28),nil,12*k,0);
+                NSImageView *icon=hq_glyph(@"trophy.fill",@"star",36*k,ov_color(0xe5b96cff)); icon.frame=R(xx+37,y+239,50,50);
+                [v addSubview:icon];
+                NSTextField *title=[NSTextField wrappingLabelWithString:titles[tile]];
+                title.frame=R(xx+118,y+247,tileWidth-142,52); title.font=[NSFont systemFontOfSize:21*k weight:NSFontWeightSemibold];
+                title.maximumNumberOfLines=2; title.lineBreakMode=NSLineBreakByTruncatingTail; title.textColor=ink;
+                [v addSubview:title];
+            }
+            if (!titles.count) {
                 ov_box(v,R(x,y+195,tabWidth,76),surface,border,16*k,k);
                 L(x+24,y+217,tabWidth-48,30,T(@"No achievements unlocked"),20,NSFontWeightRegular,muted);
             }
@@ -344,10 +393,10 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
                 [network isEqual:T(@"ZeroTier connected")] ? @"ZeroTier" : network] : (d[@"ldn"] ?: T(@"Unavailable"));
             NSArray *values=@[ov_presets(fr)[MIN(3,MAX(0,[d[@"preset"] intValue]))],d[@"volume"] ?: @"—",d[@"controllers"] ?: @"—",local];
             for (int i=0;i<HQ_POWER;i++) {
-                CGFloat yy=y+i*84; BOOL selected=q.selection==i;
-                ov_box(v,R(x,yy,w,72),surface,selected ? focus : border,16*k,(selected ? 2 : 1)*k);
+                CGFloat yy=y+i*80; BOOL selected=q.selection==i;
+                ov_box(v,R(x,yy,w,72),rowGlass,selected ? focus : nil,16*k,2*k);
                 BOOL cycle=q.card<0 && i<HQ_PADS;
-                L(x+24,yy+22,q.card<0 ? w*.50 : w-48,35,items[i],23,NSFontWeightRegular,ink);
+                L(x+26,yy+22,q.card<0 ? w*.50 : w-50,35,items[i],21,NSFontWeightRegular,ink);
                 if (q.card<0) {
                     NSString *value=cycle ? values[i] : [NSString stringWithFormat:@"%@   ›",values[i]];
                     ov_label(v,R(x+w*.53,yy+22,w*.47-(cycle ? 60 : 24),35),value,21*k,NSFontWeightSemibold,muted,NSTextAlignmentRight);
@@ -357,7 +406,7 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
                 if (cycle) for (int next=0;next<=1;next++) {
                     CGFloat span=fmax(86,[values[i] sizeWithAttributes:@{NSFontAttributeName:[NSFont systemFontOfSize:21 weight:NSFontWeightSemibold]}].width);
                     CGFloat ax=x+w-(next ? 54 : 107+span);
-                    ov_button(v,R(ax,yy+12,36,48),next ? @"›" : @"‹",nil,26*k,ink,nil,nil,0,0,OV_VALUE,next ? i : -i-1,NO).accessibilityLabel=
+                    ov_button(v,R(ax,yy+12,36,48),next ? @"›" : @"‹",nil,21*k,ink,nil,nil,0,0,OV_VALUE,next ? i : -i-1,NO).accessibilityLabel=
                         [NSString stringWithFormat:@"%@ — %@",T(next ? @"Increase" : @"Decrease"),items[i]];
                 }
             }
@@ -411,21 +460,24 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
             @[d[@"ldn"] ?: T(@"LDN disabled"),d[@"network"] ?: T(@"VPN not configured")];
         if (!rows.count) rows = @[T(@"No controllers connected")];
         NSUInteger visible = MIN(rows.count, 8);
-        CGFloat w = 520, h = q.card == HQ_HUD ? 292 : q.card == HQ_VOLUME ? 130 : 68+56*visible+(rows.count>visible ? 26 : 0);
+        CGFloat w = q.card == HQ_HUD ? 608 : 520, h = q.card == HQ_HUD ? 330 : q.card == HQ_VOLUME ? 130 : 68+56*visible+(rows.count>visible ? 26 : 0);
         CGFloat x = quick ? fmax(30,fmin(rail+96*q.selection-w/2,l.w-w-30)) : cx-478;
         CGFloat y = quick ? l.h-230-h : (l.h-1080)/2+320;
-        ov_box(v,R(x,y,w,h),surface,border,18*k,k);
+        NSView *cardView=ov_box(v,R(x,y,w,h),surface,[ink colorWithAlphaComponent:.16],18*k,k);
+        cardView.layer.shadowColor=NSColor.blackColor.CGColor; cardView.layer.shadowOffset=CGSizeZero;
+        cardView.layer.shadowRadius=40*k; cardView.layer.shadowOpacity=.5;
         L(x+36,y+18,340,28,q.card == HQ_HUD ? T(@"Performance HUD") : items[q.card],21,NSFontWeightSemibold,ink);
         int first = 0;
         if (q.card == HQ_HUD) {
             NSString *scope = d[@"scope"] ?: T(@"For this game");
-            ov_button(v,R(x+380,y+20,110,26),scope.uppercaseString,nil,12*k,ink,soft,q.row==4 ? focus : nil,13*k,k,OV_ROW,4,q.row==4);
-            ov_box(v,R(x+10,y+62,w-20,52),q.row==0 ? soft : nil,q.row==0 ? focus : nil,12*k,2*k);
+            ov_button(v,R(x+w-176,y+17,150,34),scope.uppercaseString,nil,17*k,ink,soft,q.row==4 ? focus : nil,17*k,1*k,OV_ROW,4,q.row==4);
+            ov_box(v,R(x+16,y+66,w-32,54),soft,q.row==0 ? focus : border,23*k,(q.row==0 ? 2 : 1)*k);
             NSArray *presets = ov_presets(fr);
+            CGFloat segment=(w-42)/4;
             for (int i = 0; i < 4; i++) {
                 BOOL selected = i == [d[@"preset"] intValue];
-                ov_button(v,R(x+15+i*122.5,y+67,122,42),presets[i],nil,17*k,selected ? ov_color(0x111111ff) : muted,
-                          selected ? ov_color(0x9ccbffff) : nil,nil,7*k,0,OV_PRESET,i,selected);
+                ov_button(v,R(x+21+i*segment,y+71,segment,44),presets[i],nil,21*k,selected ? on : ink,
+                          selected ? focus : nil,nil,19*k,0,OV_PRESET,i,selected);
             }
             first = 1;
         } else if (q.card == HQ_VOLUME) {
@@ -437,22 +489,22 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
             ov_box(v,R(track+width*fraction-8,cy-8,16,16),focus,nil,8*k,0);
             C(x+344,y+76,108,26,d[@"volume"],17,NSFontWeightSemibold,ink);
             for (int i=0; i<2; i++) {
-                ov_button(v,R(x+(i ? 454 : 26),y+69,40,38),i ? @"▸" : @"◂",nil,20*k,ink,nil,nil,0,0,OV_ROW,i-1,NO);
+                ov_button(v,R(x+(i ? 454 : 26),y+69,40,38),i ? @"›" : @"‹",nil,21*k,ink,nil,nil,0,0,OV_ROW,i-1,NO);
                 ((NSButton *)v.subviews.lastObject).accessibilityLabel = i ? T(@"Increase") : T(@"Decrease");
             }
             visible = 0;
         }
         for (NSUInteger i=0; i<visible; i++) {
-            CGFloat ry = y+62+(first+i)*56;
+            CGFloat ry = q.card==HQ_HUD ? y+129+i*64 : y+62+(first+i)*56;
             if (q.card == HQ_HUD) {
                 NSInteger row = i+first; BOOL selected = row == q.row;
                 NSArray *values = @[d[@"position"] ?: @"",d[@"size"] ?: @"",d[@"opacity"] ?: @""];
-                if (selected) ov_box(v,R(x+10,ry,w-20,52),soft,focus,12*k,2*k);
-                L(x+36,ry+15,235,24,rows[i],18,NSFontWeightRegular,ink);
-                C(x+303,ry+15,174,24,values[i],17,NSFontWeightSemibold,ink);
-                ov_button(v,R(x+274,ry+9,45,34),@"◂",nil,18*k,muted,nil,nil,0,0,OV_ROW,-row-1,NO);
+                if (selected) ov_box(v,R(x+16,ry,w-32,56),soft,focus,16*k,2*k);
+                L(x+42,ry+17,220,28,rows[i],21,NSFontWeightRegular,ink);
+                C(x+w-284,ry+17,196,28,values[i],21,NSFontWeightSemibold,ink);
+                ov_button(v,R(x+w-336,ry+7,46,42),@"‹",nil,21*k,ink,nil,nil,0,0,OV_ROW,-row-1,NO);
                 ((NSButton *)v.subviews.lastObject).accessibilityLabel = [NSString stringWithFormat:@"%@ — %@",T(@"Decrease"),rows[i]];
-                ov_button(v,R(x+461,ry+9,45,34),@"▸",nil,18*k,muted,nil,nil,0,0,OV_ROW,row,NO);
+                ov_button(v,R(x+w-82,ry+7,46,42),@"›",nil,21*k,ink,nil,nil,0,0,OV_ROW,row,NO);
                 ((NSButton *)v.subviews.lastObject).accessibilityLabel = [NSString stringWithFormat:@"%@ — %@",T(@"Increase"),rows[i]];
             } else if (q.card == HQ_PADS && pads.count) {
                 int player = [pads[i][@"player"] intValue];
@@ -503,6 +555,7 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
         else L(x+42,l.h-77,w+8,28,label,21,NSFontWeightRegular,ink);
     }
 #undef T
+#undef TYPE
 #undef L
 #undef C
 #undef R

@@ -32,6 +32,14 @@ static void settings(void) {
     [store setObject:@[@3,@2,@1,@"bad"] forKey:@"game-a"];
     assert(ov_hud_load(store,@"game-a").preset == 1);
     [store removePersistentDomainForName:domain];
+    DmFPSView *fps=ov_fps_view();
+    ov_fps_sample(fps,240,4.2,@[@15,@17,@90],YES);
+    NSRect bounds=NSMakeRect(0,0,1600,900);
+    for (int p=1;p<=3;p++) for (int z=0;z<3;z++) for (int corner=0;corner<4;corner++) {
+        ov_fps_layout(fps,bounds,(ov_hud){p,corner,z,2,YES});
+        assert(NSContainsRect(bounds,fps.frame) && NSWidth(fps.rate.frame)>=fps.rate.intrinsicContentSize.width);
+        assert(fps.rate.alignment==((corner&1) ? NSTextAlignmentRight : NSTextAlignmentLeft));
+    }
 }
 
 static NSImage *backdrop(NSString *dir, BOOL blur) {
@@ -60,9 +68,14 @@ static void capture(NSString *out, NSString *name, NSRect bounds, NSImage *pictu
         [stage addSubview:image];
     }
     if (preset) {
-        NSTextField *fps = ov_fps_label(ov_fps_text(preset,60,16.7,@"▃▂▆▃▄▂▃▃"));
+        DmFPSView *fps = ov_fps_view();
+        ov_fps_sample(fps,60,16.7,@[@15,@16,@16.5,@24,@18,@16,@21,@16.7,@15,@16,@19,@16.7],YES);
         ov_fps_layout(fps,bounds,ov_hud_preset(preset,YES));
         assert(NSContainsRect(bounds,fps.frame));
+        assert(NSWidth(fps.rate.frame)>=fps.rate.intrinsicContentSize.width);
+        assert(fps.interval.hidden==(preset==1) && fps.graph.hidden!=(preset==3));
+        if (preset>=2) assert(NSMaxY(fps.interval.frame)<NSMinY(fps.rate.frame));
+        if (preset==3) assert(NSContainsRect(fps.bounds,fps.graph.frame) && NSMaxY(fps.graph.frame)<NSMinY(fps.interval.frame));
         [stage addSubview:fps];
     }
     if (overlay) {
@@ -109,6 +122,7 @@ static void screens(NSString *out, NSString *assets, NSRect bounds, NSDictionary
     }
     capture(out,@"hud-minimal",bounds,picture,nil,1);
     capture(out,@"hud-standard",bounds,picture,nil,2);
+    capture(out,@"hud-full",bounds,picture,nil,3);
     NSDictionary *empty=ov_social([@"{\"profile\":{},\"friends\":{\"items\":[]},\"achievements\":{}}" dataUsingEncoding:NSUTF8StringEncoding]);
     for (NSArray *item in @[@[@(OV_PROFILE),@"profile-empty"],@[@(OV_FRIENDS),@"friends-empty"],
         @[@(OV_FRIENDS),@"friends-private"],@[@(OV_ACHIEVEMENTS),@"achievements-empty"],@[@(OV_SETTINGS),@"settings-empty"]]) {
