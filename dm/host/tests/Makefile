@@ -101,6 +101,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_account
 	$(B)/t_home_quit
 	$(B)/t_home_quit_mac
+	$(B)/t_game_overlay_mac
 	$(B)/t_ctrl_prompt
 	$(B)/t_motion_pro
 	$(B)/t_motion_pro_mac
@@ -341,11 +342,13 @@ account-saves: $(B)/t_account_save
 	$(B)/t_account_save
 $(B)/t_account_save: t_account_save.c t_fs_stub.c t_nextendo_off.c ../hle_account.c ../hle_account_users.c ../account_users.h ../hle_fs.c ../hle_bigstack.c ../save_sync.c ../hle.h ../front.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_account_save.c t_fs_stub.c t_nextendo_off.c ../hle_account_users.c ../hle_bigstack.c ../save_sync.c
-run: $(B)/t_home_quit $(B)/t_home_quit_mac
+run: $(B)/t_home_quit $(B)/t_home_quit_mac $(B)/t_game_overlay_mac
 $(B)/t_home_quit: t_home_quit.c ../home_quit.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_home_quit.c
 $(B)/t_home_quit_mac: t_home_quit_mac.m ../home_quit_mac.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -I.. -o $@ t_home_quit_mac.m -framework Cocoa -framework QuartzCore
+$(B)/t_game_overlay_mac: t_game_overlay_mac.m ../game_overlay_mac.h ../overlay_settings_mac.h ../home_quit.h ../home_quit_mac.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -I.. -o $@ t_game_overlay_mac.m -framework Cocoa -framework QuartzCore -framework CoreImage
 run: $(B)/t_ctrl_prompt
 $(B)/t_ctrl_prompt: t_ctrl_prompt.c ../ctrl_prompt.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -I.. -o $@ t_ctrl_prompt.c

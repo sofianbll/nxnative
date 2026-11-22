@@ -42,7 +42,8 @@ static int test_surround_output(void) {
         {10000, 0}, {0, 10000}, {7070, 7070}, {2509, 2509},
         {7070, 0}, {0, 7070}, {32767, 32767}, {-32768, -32768}
     };
-    for (int test = 0; test < 8; test++) {
+    const int gains[] = {100, 25, 0};
+    for (int g = 0; g < 3; g++) for (int test = 0; test < 8; test++) {
         int16_t in[FRAMES * 6] = {0}, out[FRAMES * 2];
         for (int f = 0; f < FRAMES; f++) for (int ch = 0; ch < 6; ch++)
             in[f * 6 + ch] = test < 6 ? (test == ch ? 10000 : 0) : test == 6 ? 32767 : -32768;
@@ -52,17 +53,19 @@ static int test_surround_output(void) {
         atomic_init(&a.state, STATE_STARTED); atomic_init(&a.vol, 0x3f800000u);
         a.q[0] = b; a.q[1] = b + 1; atomic_init(&a.q_tail, 2);
         AudioBufferList bl = {.mNumberBuffers = 1, .mBuffers = {{2, sizeof out, out}}};
-        au_render(&a, NULL, NULL, 0, FRAMES, &bl);
+        dm_audio_game_volume(gains[g]); au_render(&a, NULL, NULL, 0, FRAMES, &bl);
         for (int f = 0; f < FRAMES; f++) for (int ch = 0; ch < 2; ch++) {
-            if (out[f * 2 + ch] != expected[test][ch]) {
-                printf("FAIL surround callback: case %d frame %d channel %d expected %d got %d\n", test, f, ch, expected[test][ch], out[f * 2 + ch]); return 1;
+            int want = expected[test][ch] * gains[g] / 100;
+            if (out[f * 2 + ch] != want) {
+                printf("FAIL surround callback: gain %d case %d frame %d channel %d expected %d got %d\n", gains[g], test, f, ch, want, out[f * 2 + ch]); return 1;
             }
         }
         if (atomic_load(&a.q_head) != 2 || atomic_load(&a.rel_tail) != 2 || a.rel[0] != b || a.rel[1] != b + 1 || a.pos || atomic_load(&a.under_n)) {
             puts("FAIL surround callback: guest buffer consumption / release order"); return 1;
         }
     }
-    puts("surround callback: all six channels audible, saturation and split-buffer release verified");
+    dm_audio_game_volume(100);
+    puts("surround callback: output gain, mute, saturation and split-buffer release verified");
     return 0;
 }
 // What the sdk's SetAudioOutBufferInfo does (Hades's sdk+0x142ab0, Metro 2033 Redux's sdk+0x80f80, the same in SDK 8 to Switch 2's): the host leaves it and the other descriptor

@@ -208,6 +208,10 @@ static void pull_device(aout *a, uint8_t *dst, uint64_t bytes) {
 }
 
 static _Atomic uint64_t g_render_calls;   // Cumulative sound card callbacks (lifecycle verification: must keep growing after resume)
+static _Atomic int g_game_volume = 100;
+void dm_audio_game_volume(int percent) {
+    atomic_store_explicit(&g_game_volume, percent < 0 ? 0 : percent > 100 ? 100 : percent, memory_order_relaxed);
+}
 uint64_t dm_audio_render_calls(void) { return atomic_load_explicit(&g_render_calls, memory_order_relaxed); }
 static unsigned queued_pcm_blocks(const aout *a) {
     // The consumer acquired a tail at least this far before publishing the playback head.
@@ -234,7 +238,12 @@ static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioT
         memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
     } else {
         pull_device(a, bl->mBuffers[0].mData, bl->mBuffers[0].mDataByteSize);
-        if (a->mute) memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
+        int gain = atomic_load_explicit(&g_game_volume, memory_order_relaxed);
+        if (a->mute || !gain) memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
+        else if (gain < 100) {
+            int16_t *s = bl->mBuffers[0].mData;
+            for (size_t i = 0; i < bl->mBuffers[0].mDataByteSize / sizeof *s; i++) s[i] = (int16_t)(s[i]*gain/100);
+        }
     }
     return noErr;
 }

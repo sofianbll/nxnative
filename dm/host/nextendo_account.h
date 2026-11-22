@@ -23,6 +23,8 @@ uint32_t dm_nextendo_account_country(char output[3]);
 uint32_t dm_nextendo_account_birthday(char output[11]);
 // The signed-in Nextendo account's username, cut to the 32 bytes of an nn::account::Nickname at a UTF-8 character boundary (hle_nextendo_apple.m)
 uint32_t dm_nextendo_account_username(char output[33]);
+// Cached display state only: never fetch credentials or check the network from the overlay.
+int dm_nextendo_login_display(char username[33], int *online);
 // Public PKCS#1 RSA key for verifying this process's local envelope signature.
 // This does not claim registration with Nintendo or a Nextendo JWKS service.
 uint32_t dm_nextendo_copy_public_signing_key(void *buffer, uint64_t capacity, uint64_t *size);

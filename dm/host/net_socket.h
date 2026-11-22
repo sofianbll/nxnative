@@ -40,8 +40,10 @@ static inline int dm_net_vpn(void) {
 // sweep, and alone it reaches nobody, as on an empty network; unless native broadcast is available off a VPN.
 enum { DM_NET_SESSION_MAX = 7 };
 void dm_net_set_session(int room, const uint32_t *members, unsigned count);
+int dm_net_in_local_room(void);
 // Logs every IPv4 adapter's name, address, prefix, flags and functional type (LDN logs them as it starts)
 void dm_net_log_adapters(void);
+int dm_net_vpn_adapter(char name[]);   // caller supplies IF_NAMESIZE bytes; local adapter only, not a peer connectivity check
 // Startup-only DNS policy: -1 refuses, 0 keeps the name, 1 supplies IPv4.
 // Only explicit Nextendo/auto modes consult the provider.
 typedef int (*dm_net_dns_provider)(const char *host, char *output, size_t capacity);

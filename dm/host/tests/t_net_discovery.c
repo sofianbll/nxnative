@@ -297,6 +297,7 @@ static void room_broadcasts(void) {
     dm_net_test_interface a=adapter(0xffffff00); dm_net_test_set_interface(&a); dm_net_test_set_discovery_sender(record);
     int guest=dm_net_socket(2,2,0); CHECK(guest>=0);
     const uint32_t room[]={htonl(0x0a000002),htonl(0x0a000003),htonl(0x0a000004)}; dm_net_set_session(1,room,3);
+    CHECK(dm_net_in_local_room());
     address everyone=endpoint(UINT32_MAX,49152),subnet=endpoint(0x7f0000ff,49152),one=endpoint(0x0a000002,49152);
     atomic_store(&recorded,0); CHECK(dm_net_send(guest,"hello",5,0,&everyone,sizeof everyone)==5);
     CHECK(atomic_load(&recorded)==3 && !memcmp(recorded_to,room,sizeof room) && recorded_port==htons(49152));
@@ -310,6 +311,7 @@ static void room_broadcasts(void) {
     CHECK(dm_net_send(guest,"hello",5,0,&one,sizeof one)==5 && atomic_load(&recorded)==1 && recorded_to[0]==room[0]);
     // Alone in the room (a host before anyone joins), a broadcast reaches nobody and is no error, even with nothing to search over a VPN
     dm_net_set_session(1,NULL,0); setenv("DM_NETWORK","ldn",1); setenv("DM_NET_VPN","1",1); atomic_store(&recorded,0);
+    CHECK(dm_net_in_local_room());   // a room can be active without other players
     CHECK(dm_net_send(guest,"hello",5,0,&everyone,sizeof everyone)==5 && !atomic_load(&recorded));
     unsetenv("DM_NET_VPN"); setenv("DM_NETWORK","auto",1); dm_net_set_session(1,room,3);
     // Where native broadcast works and no VPN is in the way it is used; over a VPN the room is used even there
@@ -320,6 +322,7 @@ static void room_broadcasts(void) {
     unsetenv("DM_NET_VPN"); setenv("DM_NETWORK","auto",1); dm_net_set_multicast_allowed(0);
     // Out of the room, discovery is as before: here the host's address
     dm_net_set_session(0,NULL,0); setenv("DM_NET_DISCOVERY_PEER","127.0.0.1",1); atomic_store(&recorded,0);
+    CHECK(!dm_net_in_local_room());
     CHECK(dm_net_send(guest,"hello",5,0,&everyone,sizeof everyone)==5 && atomic_load(&recorded)==1 && recorded_to[0]==htonl(INADDR_LOOPBACK));
     unsetenv("DM_NET_DISCOVERY_PEER"); CHECK(!dm_net_close(guest)); dm_net_test_set_discovery_sender(NULL); dm_net_test_set_interface(NULL);
 }

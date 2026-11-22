@@ -71,6 +71,12 @@ void dm_net_set_session(int room, const uint32_t *members, unsigned count) {
     if (count) memcpy(g_session_members, members, count * sizeof *members);
     g_session_count = room ? (int)count : -1; pthread_mutex_unlock(&g_session_lock);
 }
+int dm_net_in_local_room(void) {
+    pthread_mutex_lock(&g_session_lock);
+    int active = g_session_count >= 0;
+    pthread_mutex_unlock(&g_session_lock);
+    return active;
+}
 // VPN play's notices are about the adapter, which net_interface_get reads again for every ipconfig and discovery plan: each kind is logged when its
 // text differs from the last
 enum { NET_VPN_ADAPTER, NET_VPN_SEARCH };
@@ -1193,6 +1199,10 @@ static int net_vpn_interface(net_interface *out) {
                      "IPv4 address). Connect the VPN app, or turn DM_NET_VPN off for play on one Wi-Fi");
     }
     return -1;
+}
+int dm_net_vpn_adapter(char name[]) {
+    net_interface i;
+    return !net_vpn_interface(&i) && if_indextoname(i.index, name) != NULL;
 }
 static int net_interface_find(net_interface *out) {
     memset(out, 0, sizeof *out);

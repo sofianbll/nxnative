@@ -1,7 +1,4 @@
-// The views of the Home button's quit prompt (home_quit.h), drawn over the game's view by front_mac.m: AppKit views, so they draw while the game runs, and built here
-// alone so tests/t_home_quit_mac.m can build and draw them without a window or a controller. The look follows NX2Apple's console mode: a dark surface and a cream
-// accent, the primary action as a cream pill with the controller's own button glyph. Sizes follow the view's height, so the prompt reads from a couch on a TV and
-// stays in proportion in a small window.
+// Shared AppKit hold indicator and controller applet card, built without a guest by t_home_quit_mac.
 #pragma once
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/QuartzCore.h>
@@ -40,7 +37,7 @@ static CGFloat hq_fit(NSString *text, CGFloat size, CGFloat room) {
     return s < size * 0.7 ? size * 0.7 : s;
 }
 // One action of the prompt: glyph and label centred in a pill of a fixed size, the primary one cream
-static NSView *hq_action(NSString *symbol, NSString *fallback, NSString *label, int primary, CGFloat k) {
+static NSView *hq_card_action(NSString *symbol, NSString *fallback, NSString *label, int primary, CGFloat k) {
     NSColor *fg = primary ? HQ_BACKGROUND : [NSColor colorWithWhite:1 alpha:0.8];
     CGFloat w = HQ_ACTION_W * k, glyph = 24 * k, gap = 10 * k, inset = 20 * k, room = w - 2 * inset - glyph - gap;
     NSTextField *t = hq_label(label, hq_fit(label, 22 * k, room), NSFontWeightSemibold, fg, 0);
@@ -78,7 +75,7 @@ static NSView *hq_card_view(NSRect bounds, NSString *title, NSString *note, NSSt
     NSView *scrim = [[HqScrim alloc] initWithFrame:bounds]; scrim.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     scrim.wantsLayer = YES; scrim.layer.backgroundColor = [NSColor colorWithWhite:0 alpha:0.6].CGColor;
     NSTextField *t = hq_label(title, 34 * k, NSFontWeightBold, NSColor.whiteColor, 1), *n = hq_label(note, 20 * k, NSFontWeightRegular, [NSColor colorWithWhite:1 alpha:0.6], 1);
-    NSStackView *actions = [NSStackView stackViewWithViews:@[hq_action(a_symbol, @"a.circle", quit, a_on, k), hq_action(b_symbol, @"b.circle", cancel, 0, k)]];
+    NSStackView *actions = [NSStackView stackViewWithViews:@[hq_card_action(a_symbol, @"a.circle", quit, a_on, k), hq_card_action(b_symbol, @"b.circle", cancel, 0, k)]];
     actions.spacing = 16 * k; actions.translatesAutoresizingMaskIntoConstraints = NO;
     NSStackView *card = [NSStackView stackViewWithViews:@[t, n, actions]];
     card.orientation = NSUserInterfaceLayoutOrientationVertical; card.alignment = NSLayoutAttributeCenterX;
@@ -95,46 +92,6 @@ static NSView *hq_card_view(NSRect bounds, NSString *title, NSString *note, NSSt
 }
 static NSView *hq_prompt_view(NSRect bounds, NSString *title, NSString *note, NSString *quit, NSString *cancel, NSString *a_symbol, NSString *b_symbol) {
     return hq_card_view(bounds, title, note, quit, cancel, a_symbol, b_symbol, 1);
-}
-
-@interface HqMenuScrim : HqScrim
-@property (copy) void (^choose)(NSInteger row);
-- (void)chooseRow:(NSButton *)sender;
-@end
-@implementation HqMenuScrim
-- (void)chooseRow:(NSButton *)sender { self.choose(sender.tag); }
-@end
-
-static NSView *hq_menu_view(NSRect bounds, NSString *title, NSArray<NSString *> *labels, NSInteger sel, void (^choose)(NSInteger)) {
-    CGFloat k = hq_scale(bounds.size);
-    HqMenuScrim *scrim = [[HqMenuScrim alloc] initWithFrame:bounds];
-    scrim.choose = choose; scrim.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    scrim.wantsLayer = YES; scrim.layer.backgroundColor = [NSColor colorWithWhite:0 alpha:0.6].CGColor;
-    NSTextField *t = hq_label(title, 34 * k, NSFontWeightBold, NSColor.whiteColor, 1);
-    NSStackView *card = [NSStackView stackViewWithViews:@[t]];
-    card.orientation = NSUserInterfaceLayoutOrientationVertical; card.alignment = NSLayoutAttributeCenterX;
-    card.spacing = 10 * k; card.edgeInsets = NSEdgeInsetsMake(24 * k, 24 * k, 24 * k, 24 * k);
-    card.translatesAutoresizingMaskIntoConstraints = NO; card.wantsLayer = YES;
-    card.layer.backgroundColor = HQ_SURFACE.CGColor; card.layer.cornerRadius = 28 * k;
-    CGFloat w = fmin(360 * k, fmax(bounds.size.width - 72 * k, 120));
-    for (NSInteger i = 0; i < (NSInteger)labels.count; i++) {
-        NSButton *b = [NSButton buttonWithTitle:labels[i] target:scrim action:@selector(chooseRow:)];
-        b.tag = i; b.bordered = NO; b.translatesAutoresizingMaskIntoConstraints = NO;
-        b.wantsLayer = YES; b.layer.cornerRadius = 26 * k;
-        b.layer.backgroundColor = (i == sel ? HQ_CREAM : [NSColor colorWithWhite:1 alpha:0.08]).CGColor;
-        NSColor *fg = i == sel ? HQ_BACKGROUND : NSColor.whiteColor;
-        b.attributedTitle = [[NSAttributedString alloc] initWithString:labels[i] attributes:@{
-            NSFontAttributeName: [NSFont systemFontOfSize:hq_fit(labels[i], 22 * k, w - 32) weight:NSFontWeightSemibold], NSForegroundColorAttributeName: fg}];
-        b.cell.lineBreakMode = NSLineBreakByTruncatingTail;
-        b.accessibilitySelected = i == sel;
-        [card addArrangedSubview:b];
-        [NSLayoutConstraint activateConstraints:@[[b.widthAnchor constraintEqualToConstant:w], [b.heightAnchor constraintEqualToConstant:52 * k]]];
-    }
-    [scrim addSubview:card];
-    [NSLayoutConstraint activateConstraints:@[[card.centerXAnchor constraintEqualToAnchor:scrim.centerXAnchor], [card.centerYAnchor constraintEqualToAnchor:scrim.centerYAnchor],
-        [t.widthAnchor constraintLessThanOrEqualToConstant:w]]];
-    scrim.accessibilityElement = YES; scrim.accessibilityRole = NSAccessibilityGroupRole; scrim.accessibilityLabel = title;
-    return scrim;
 }
 
 // The hold indicator at the top of the view: a pill with a ring that fills while Home is held, and its label. hq_hold_set moves the ring

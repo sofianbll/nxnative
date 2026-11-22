@@ -1,7 +1,6 @@
 // Mac front end: with DM_WINDOW=1 open a window (CAMetalLayer, for the graphics backend to present frames) + keyboard and controllers → dm_input; the guest runs on a large-stack thread instead and the main thread belongs to AppKit.
 // Without DM_WINDOW: run the guest on the current thread with the default application task role (front_role.h).
-// The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN=1 starts it that way. ⌘Q quits, and so does a controller's Home button held for 2 s and
-// confirmed with A (home_quit.h). A launcher can opt in to the short-press Home menu and background pause; the left mouse button is the touchscreen.
+// The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN=1 starts it that way. ⌘Q quits; Home opens the session overlay.
 // Cheats (hle_cheats.c): the Cheats menu's rows toggle, reload (⌘R) and open the cheats folder; its first item "Show Cheats
 // Window" (⌘⇧C, or DM_CHEATS_WINDOW=1 at launch) opens a Cheats panel beside the game: sections, search, the master switch,
 // safe mode, values, details and the import of cheat files (see the code below).
@@ -30,12 +29,15 @@ static int s2pad_player(s2_pad *d);   // the Switch 2 pads' player slots (below,
 static void s2pad_read(s2_pad *d);
 static void (*g_merge_sink)(const dm_haptic_state *);   // DM_PAD_MERGE: where player 1's rumble goes, the pads last used (merge_rumble_to): NULL for GameController's
 static void merge_rumble_to(void (*sink)(const dm_haptic_state *));
-#include "home_quit.h"
-#include "home_quit_mac.h"
+#include "game_overlay_mac.h"
+#include "net_socket.h"
+#include "nextendo_account.h"
 #include "ctrl_prompt.h"
 #include "user_select_mac.h"
 #include <signal.h>
 #include <math.h>
+#include <net/if.h>
+#include <stdatomic.h>
 #include <sys/stat.h>
 
 static CAMetalLayer *g_layer;
@@ -170,11 +172,11 @@ static int hq_menu_key(unsigned short code, int down);
 static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
     unsigned short c = e.keyCode;
-    if (hq_menu_key(c, down)) return;
     if (cp_blocks_input(g_cp.phase)) {   // the prompt has the keyboard: Return or J (A) is done, Escape or K (B) closes it, no key reaches the game
         if (down && g_cp.phase == CP_OPEN) { if (c == 53 || c == 40) g_cp_cancel = 1; else if (c == 36 || c == 38) g_cp_confirm = 1; cp_poll(); }
         return;
     }
+    if (hq_menu_key(c, down)) return;
     switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
     // An arrow key pressed with Shift held is the right stick until it is released; without Shift, the D-pad. The keyboard had no right stick: a 3D game's camera
     // could be turned only with a controller (Donkey Kong Bananza)
@@ -195,16 +197,24 @@ static void on_key(NSEvent *e, int down) {
 static pad_slots g_slots;
 static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
 static int g_merge, g_kbd_own;
+static home_quit g_hq;
+static int g_hq_arcane, g_hq_pulse = -1, g_ov_menu_player = -1;
 static int32_t pad_axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * DM_STICK_MAX); }
 // A controller's state for player p, GameController or raw HID: a pressed button or a stick past 15% hides the pointer (cursor_hide_for_input), a resting stick's drift does not
 static void pad_set(int p, uint64_t m, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
+    if (!g_hq.disabled && !g_hq.no_hold) {
+        if (g_hq.phase == HQ_HOLDING && g_hq.trigger == HQ_PLUS && g_ov_menu_player < 0 && (m & DM_BTN_PLUS))
+            g_ov_menu_player = p;   // Menu itself can be the player's first press to join
+        m &= ~DM_BTN_PLUS;
+        if (p == g_hq_pulse) m |= DM_BTN_PLUS;
+    }
     const int32_t dead = DM_STICK_MAX * 15 / 100;
     if (m || abs(lx) > dead || abs(ly) > dead || abs(rx) > dead || abs(ry) > dead) cursor_hide_for_input();
     dm_pad_set_player(p, m, lx, ly, rx, ry);
 }
 static void hq_poll(void);
-static home_quit g_hq;   // the Home button's hold and quit prompt (home_quit.h): while the prompt is open the controllers' input goes to it, not to the game
 static void hq_close(void);
+static void hq_home_preference(GCController *c);
 static int g_press_to_join;   // DM_PAD_PRESS_TO_JOIN=1, below pad_read
 static int pad_join(const void *owner, const char *name);
 static const char *pad_name(GCController *c);
@@ -234,11 +244,12 @@ static void pad_read(GCExtendedGamepad *g) {
     dm_haptics_apple_controller(p, g.controller);
     pad_set(p, m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
 }
-// Home and Capture: without this macOS takes them as system gestures (Home opens the Games app). Capture has no host action; Home goes to hq_poll.
+// Request Home for the game overlay without reserving the system's Capture gesture.
 // macOS 27 respects the claim when the Home button setting for apps lets the app decide (hq_log_setting names it in the log)
 static void pad_keep_system_buttons(GCController *c) {
-    for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled;
-    c.extendedGamepad.buttonHome.pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL down) { (void)b; (void)v; (void)down; if (g_input_on) hq_poll(); };
+    hq_home_preference(c);
+    GCControllerButtonInput *home = c.extendedGamepad.buttonHome ?: c.physicalInputProfile.buttons[GCInputButtonHome];
+    home.pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL down) { (void)b; (void)v; (void)down; if (g_input_on) hq_poll(); };
 }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
@@ -272,7 +283,9 @@ static int merge_pads_left(GCController *gone) {
 }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil on a connect)
 static void pads_changed(GCController *gone) {
-    if (g_hq.menu && g_hq.phase == HQ_HOLDING && gone.extendedGamepad.buttonHome.isPressed) hq_close();   // disconnection is not a tap
+    if (gone && g_hq.phase == HQ_HOLDING) hq_close();   // disconnection is not a tap
+    for (GCController *c in GCController.controllers)
+        if (c != gone && !c.extendedGamepad && !jc1_gc_unread(c)) pad_keep_system_buttons(c);
     if (g_merge) {
         int any = 0;
         for (GCController *c in GCController.controllers) if (jc1_gc_unread(c)) pad_keep_system_buttons(c);   // read from HID (pad_jc1_mac.h), a lone Joy-Con's too (no extended gamepad profile)
@@ -356,10 +369,10 @@ static void keys_touch_release(void) {
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
 }
 static void input_release(void) {
+    g_input_on = 0;
     hq_close();   // the prompt or the hold indicator, if one is up: the Games app the system opens for Home takes the focus too
     [NSCursor setHiddenUntilMouseMoves:NO];
     display_awake(0);
-    g_input_on = 0;
     dm_motion_pro_active(0); hidpad_motion_clear();
     dm_switch2_active(0); dm_jc1_active(0);
     keys_touch_release();
@@ -370,8 +383,9 @@ static void input_resume(void) {
     g_input_on = 1;
     dm_motion_pro_active(1);
     dm_switch2_active(1); dm_jc1_active(1);
+    for (GCController *c in GCController.controllers) hq_home_preference(c);
     pads_reread();
-    if (g_hq.menu) hq_poll();   // also sample Home on focus gain if only raw HID pads are connected
+    hq_poll();
 }
 // Raw HID gamepads (pad_hid_mac.h): a player slot each, as a GameController controller, named by the device's product name. Identical pads that GameController lists
 // fewer of are read the same way, an identical Pro Controller from its report 0x30.
@@ -389,7 +403,7 @@ static void hidpad_show_player(hid_pad *d, int p, uint64_t m) {
     if (d->sink != p + 1) { d->sink = p + 1; dm_haptics_apple_set_sink(p, dm_hidpad_rumble); }   // its rumble goes over HID, not to a Core Haptics engine
 }
 static void hidpad_read(hid_pad *d) {
-    if (g_hq.menu && (g_hq.phase == HQ_MENU || g_hq.phase == HQ_SETTLE)) hq_poll();   // d-pad and sticks can change without Home/A/B
+    hq_poll();
     if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
     int p = hidpad_player(d), full = hidpad_full(d);
     uint64_t m = full ? d->pro_m : pad_hid_buttons(&d->st);
@@ -414,12 +428,13 @@ static void hidpad_motion(hid_pad *d, const float acc[3], const float rot[3], ui
 }
 static void hidpad_models_changed(void) { pads_changed(nil); }
 static void hidpad_quit_changed(int interrupted) {
-    if (interrupted && g_hq.menu && g_hq.phase == HQ_HOLDING) hq_close();   // report mode switched or pad disconnected, not a tap
+    if (interrupted && g_hq.phase == HQ_HOLDING) hq_close();   // report mode switched or pad disconnected, not a tap
     if (g_input_on) hq_poll();
 }
 static void hidpad_detach(hid_pad *d) {   // d is already off g_hidpads
     uint32_t q = hidpad_quit_buttons(d);
-    if (q) hidpad_quit_changed(!!(q & HIDPAD_QUIT_HOME));
+    if (g_hq.phase == HQ_HOLDING) hq_close();
+    if (q) hidpad_quit_changed(0);
     if (g_merge) {   // as pads_changed: released when the last controller goes away
         LOG("controller '%s' (HID) disconnected", d->name);
         int rumbles = 0; for (hid_pad *o = g_hidpads; o; o = o->next) rumbles |= hidpad_rumbles(o);
@@ -466,7 +481,7 @@ static int s2pad_attach(s2_pad *d) {   // 1: kept (a player, or waiting for its 
     return 1;
 }
 static void s2pad_detach(s2_pad *d) {   // d is already off g_s2pads
-    if (g_hq.menu && g_hq.phase == HQ_HOLDING && s2_pad_home(&d->st)) hq_close();
+    if (g_hq.phase == HQ_HOLDING) hq_close();
     if (g_merge) {
         LOG("controller '%s' (Bluetooth) disconnected", d->name);
         if (!dm_switch2_pads() && g_merge_sink == dm_switch2_rumble) merge_rumble_to(NULL);
@@ -503,7 +518,7 @@ static void jc1pad_attach(jc1_pad *d) {
     jc1pad_read(d);
 }
 static void jc1pad_detach(jc1_pad *d) {   // d is already off g_jc1_pads
-    if (g_hq.menu && g_hq.phase == HQ_HOLDING && jc1_pad_home(d)) hq_close();
+    if (g_hq.phase == HQ_HOLDING) hq_close();
     if (g_merge) {
         LOG("controller '%s' (HID) disconnected", d->name);
         if (!g_jc1_pads && g_merge_sink == dm_jc1_rumble) merge_rumble_to(NULL);
@@ -518,191 +533,447 @@ static void jc1pad_detach(jc1_pad *d) {   // d is already off g_jc1_pads
     cp_poll();   // one player fewer
 }
 static void jc1_models_changed(void) { pads_changed(nil); }
-// Quit with the Home button (home_quit.h, LNPANDY/NX2Apple#336): held for 2 s it opens the prompt (home_quit_mac.h) over the game's view, A quits through the same path as ⌘Q
-// (NSApp terminate, so the save writer and the other exit handlers run as there), B or Home closes it. While the prompt is open the game is told it lost the focus, as the
-// Switch's HOME menu does, and gets no controller input or touch; the keyboard and ⌘Q work as always. DM_HOME_QUIT=0 turns it off
-static NSTimer *g_hq_timer;   // held Home or open overlay: time and controller changes even without a callback
-static NSView *g_hq_hold, *g_hq_prompt, *g_hq_menu; static CAShapeLayer *g_hq_ring;
-static GCController *g_hq_holder;
-static int g_hq_menu_quit;
+static NSTimer *g_hq_timer, *g_hud_timer;
+static NSView *g_hq_hold, *g_hq_view;
+static NSVisualEffectView *g_hq_blur;
+static NSTextField *g_hud_label;
+static CAShapeLayer *g_hq_ring;
+static BOOL g_ov_fr;
+static BOOL g_ov_home_seen, g_ov_home_system, g_ov_help_once, g_ov_help_visible;
+static double g_ov_started;
+static NSString *g_ov_game, *g_ov_vpn;
+static NSImage *g_ov_cover;
+static NSDictionary *g_ov_theme;
+static NSDictionary *g_ov_social;
+static NSUserDefaults *g_hud_store;
+static ov_hud g_hud;
+static _Atomic int g_hud_enabled;
+static _Atomic uint64_t g_hud_frames;
+static int g_ov_volume = 100;
+static unsigned g_hq_pulse_serial;
+static NSMutableIndexSet *g_ov_keys_down;
+static unsigned short g_ov_keys[2];
 static char g_hq_text[HQ_TEXTS][256];
 static void bg_enter(void);
+static void hq_show(void);
+static void hud_layout(void);
+
+// An existing Metal presented handler calls this; no new handler or GPU work per frame.
+void front_frame_presented(void) {
+    if (atomic_load_explicit(&g_hud_enabled, memory_order_relaxed))
+        atomic_fetch_add_explicit(&g_hud_frames, 1, memory_order_relaxed);
+}
+static void hud_update(void) {
+    static double prior;
+    static unichar history[8];
+    double now = CACurrentMediaTime(), period = now - prior;
+    if (period < .5) return;
+    uint64_t frames = atomic_exchange_explicit(&g_hud_frames, 0, memory_order_relaxed);
+    prior = now;
+    if (!g_hud.preset || period > 2 || period <= 0) frames = 0;
+    if (g_hud.preset == 3) {
+        double ms = frames ? 1000 * period / frames : 0;
+        static const unichar bars[] = {0x2581,0x2582,0x2583,0x2584,0x2585,0x2586,0x2587,0x2588};
+        memmove(history,history+1,sizeof history-sizeof *history);
+        history[7] = bars[(int)fmin(7, ms/5)];
+        NSUInteger oldest = 0; while (!history[oldest]) oldest++;
+        g_hud_label.stringValue = frames ? [NSString stringWithFormat:@"%.0f FPS  ·  %.1f ms  %@", frames/period, ms,
+            [NSString stringWithCharacters:history+oldest length:8-oldest]] : @"— FPS";
+    } else g_hud_label.stringValue = !frames ? @"— FPS" : g_hud.preset == 1 ? [NSString stringWithFormat:@"%.0f FPS", frames/period] :
+        [NSString stringWithFormat:@"%.0f FPS  ·  %.1f ms", frames/period, 1000*period/frames];
+    hud_layout();
+}
+static void hud_layout(void) {
+    NSView *cv = g_win.contentView;
+    if (!g_hud_label) return;
+    g_hud_label.hidden = !g_hud.preset || g_hq.phase == HQ_FULL;
+    CGFloat k = fmax(.55, fmin(NSWidth(cv.bounds)/1920, NSHeight(cv.bounds)/1080));
+    g_hud_label.font = [NSFont monospacedDigitSystemFontOfSize:(15 + 5*g_hud.size)*k weight:NSFontWeightSemibold];
+    CGFloat w = g_hud_label.intrinsicContentSize.width + 12*k, h = (28 + 5*g_hud.size)*k;
+    CGFloat x = g_hud.position & 1 ? NSWidth(cv.bounds)-64*k-w : 64*k;
+    CGFloat y = g_hud.position & 2 ? 40*k : NSHeight(cv.bounds)-40*k-h;
+    g_hud_label.frame = NSMakeRect(x,y,w,h);
+    g_hud_label.layer.cornerRadius = 8*k;
+    g_hud_label.alphaValue = ov_hud_opacity[g_hud.opacity]/100.0;
+}
+static void hud_apply(void) {
+    int enabled = g_hud.preset != 0;
+    if (atomic_exchange_explicit(&g_hud_enabled, enabled, memory_order_relaxed) != enabled)
+        atomic_store_explicit(&g_hud_frames, 0, memory_order_relaxed);
+    if (g_hud.preset && !g_hud_timer)
+        g_hud_timer = [NSTimer scheduledTimerWithTimeInterval:.5 repeats:YES block:^(NSTimer *t) { (void)t; hud_update(); }];
+    else if (!g_hud.preset && g_hud_timer) { [g_hud_timer invalidate]; g_hud_timer = nil; }
+    hud_layout();
+}
+static NSString *ov_env(const char *name) {
+    const char *text = getenv(name);
+    return text && strlen(text) < 4096 && *text ? [NSString stringWithUTF8String:text] : nil;
+}
 static void hq_start(void) {
+    g_hq.disabled = !hq_enabled(getenv("DM_HOME_MENU"));
     g_hq.no_hold = !hq_enabled(getenv("DM_HOME_QUIT"));
-    g_hq.menu = hq_menu_enabled(getenv("DM_HOME_MENU_LAUNCHER"), getenv("DM_HOME_MENU"));
+    g_hq_arcane = hq_menu_enabled(getenv("DM_HOME_MENU_LAUNCHER"), getenv("DM_HOME_MENU"));
+    g_ov_fr = [NSLocale.preferredLanguages.firstObject hasPrefix:@"fr"];
+    g_ov_keys_down = [NSMutableIndexSet new];
+    ov_keys(getenv("DM_OVERLAY_KEYS"), g_ov_keys);
+    g_ov_theme = ov_theme(ov_env("DM_OVERLAY_THEME_V1"));
+    NSString *social = ov_env("DM_OVERLAY_SOCIAL_V1");
+    if (social) {
+        id json = [NSJSONSerialization JSONObjectWithData:[social dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
+        if ([json isKindOfClass:NSDictionary.class]) {
+            NSMutableDictionary *tabs = [NSMutableDictionary dictionary];
+            NSArray *keys = @[@"profile",@"friends",@"achievements"];
+            for (NSUInteger i=0; i<keys.count; i++) {
+                id value = json[keys[i]];
+                if ([value isKindOfClass:NSString.class] && [[value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] length])
+                    tabs[@(OV_PROFILE+i)] = value;
+            }
+            g_ov_social = tabs;
+        }
+    }
+    g_ov_started = CACurrentMediaTime();
+    g_ov_game = [@"game-" stringByAppendingString:@(DM_GAME_ID)];
+    g_hud_store = [[NSUserDefaults alloc] initWithSuiteName:@"org.nxnative.overlay"];
+    g_hud = ov_hud_load(g_hud_store, g_ov_game);
+    g_hud_label = ov_fps_label(@"— FPS");
+    [g_win.contentView addSubview:g_hud_label];
+    hud_apply();
+    NSString *cover = ov_env("DM_OVERLAY_COVER");
+    if ([cover isAbsolutePath]) {
+        NSDictionary *file = [NSFileManager.defaultManager attributesOfItemAtPath:cover error:NULL];
+        if ([file[NSFileType] isEqual:NSFileTypeRegular] && [file[NSFileSize] unsignedLongLongValue] <= 16*1024*1024)
+            g_ov_cover = [[NSImage alloc] initWithContentsOfFile:cover];
+    }
     char title[256]; snprintf(title, sizeof title, "Quit %s?", DM_GAME_NAME);
-    const char *def[HQ_TEXTS] = {"Keep holding to quit", title, "Unsaved progress will be lost.", "Quit", "Cancel", "Resume", "Back to console mode", DM_GAME_NAME};
+    if (g_ov_fr) snprintf(title, sizeof title, "Quitter %s ?", DM_GAME_NAME);
+    const char *def[HQ_TEXTS] = {ov_text(g_ov_fr,@"Keep holding for quick access").UTF8String, title,
+        ov_text(g_ov_fr,@"Unsaved progress will be lost.").UTF8String, ov_text(g_ov_fr,@"Quit").UTF8String, ov_text(g_ov_fr,@"Cancel").UTF8String,
+        ov_text(g_ov_fr,@"Resume").UTF8String, ov_text(g_ov_fr,@"Return to Arcane").UTF8String, DM_GAME_NAME};
     const char *text = getenv("DM_HOME_QUIT_TEXT");   // a front end's, in the player's language: one line per text, in home_quit.h's order
     for (int i = 0; i < HQ_TEXTS; i++) {
         hq_text_line(text, i, def[i], g_hq_text[i], sizeof g_hq_text[i]);
+        // Older launchers' hold text names the removed two-second quit gesture.
+        if (i == HQ_TEXT_HOLD) snprintf(g_hq_text[i], sizeof g_hq_text[i], "%s", def[i]);
         if (![[NSString alloc] initWithUTF8String:g_hq_text[i]]) snprintf(g_hq_text[i], sizeof g_hq_text[i], "%s", def[i]);
     }
-    LOG("front end: hold the Home button to quit %s", g_hq.no_hold ? "is off (DM_HOME_QUIT=0)" : "is on");
-    if (g_hq.menu) LOG("front end: Home menu with Back to console mode enabled");
+    LOG("front end: game overlay %s, quick hold %s, launcher return %s", g_hq.disabled ? "off" : "on",
+        g_hq.no_hold ? "off" : "on", g_hq_arcane ? "on" : "off");
 }
 // The Home button setting for apps (macOS 27), once, when the first controller is there (GameController reads it only while one is connected): "system" in the log
 // explains a hold that does nothing, since the system keeps Home whatever the host asks. A front end reads the setting itself (GCControllerHomeButtonSettingsManager)
-static void hq_log_setting(void) {
+static void hq_home_preference(GCController *c) {
+    GCControllerButtonInput *home = c.physicalInputProfile.buttons[GCInputButtonHome];
+    if (g_hq.disabled || (!home && !c.extendedGamepad.buttonHome)) return;
 #if defined(__MAC_27_0)
     if (@available(macOS 27.0, *)) {
-        static int done; if (done) return;
-        int any = 0; for (GCController *c in GCController.controllers) if (c.extendedGamepad) any = 1;
-        if (!any) return;
-        done = 1;
+        static long last = -2;
         GCControllerHomeButtonSettingCustomizationStatus by = GCControllerHomeButtonSettingCustomizationDefault; NSError *err = nil;
-        GCControllerHomeButtonSettingInAppAction v = [[GCControllerHomeButtonSettingsManager new] readControllerHomeButtonInAppAction:&by withError:&err];
-        LOG("front end: Home button in apps: %s (%s)%s%s", hq_in_app_name((long)v), by == GCControllerHomeButtonSettingCustomizationUser ? "set by the player" : "the system's default",
-            err ? ", " : "", err ? err.localizedDescription.UTF8String : "");
+        GCControllerHomeButtonSettingsManager *settings = [GCControllerHomeButtonSettingsManager new];
+        GCControllerHomeButtonSettingInAppAction v = [settings readControllerHomeButtonInAppAction:&by withError:&err];
+        home.preferredSystemGestureState = v == GCControllerHomeButtonSettingInAppActionDefer ? GCSystemGestureStateDisabled : GCSystemGestureStateEnabled;
+        g_ov_home_system = v == GCControllerHomeButtonSettingInAppActionDefault &&
+            [settings readControllerHomeButtonSystemActionWithError:NULL] != GCControllerHomeButtonSettingSystemActionDisabled;
+        if (last != (long)v)
+            LOG("front end: Home button in apps: %s (%s)%s%s", hq_in_app_name((long)v), by == GCControllerHomeButtonSettingCustomizationUser ? "set by the player" : "the system's default",
+                err ? ", " : "", err ? err.localizedDescription.UTF8String : "");
+        last = (long)v;
+        return;
     }
 #endif
+    home.preferredSystemGestureState = GCSystemGestureStateDisabled;
+    c.extendedGamepad.buttonHome.preferredSystemGestureState = GCSystemGestureStateDisabled;
 }
-static void hq_buttons(int *home, int *a, int *b, GCController **holder) {
-    *home = *a = *b = 0;
-    for (GCController *c in GCController.controllers) {
-        GCExtendedGamepad *g = c.extendedGamepad; if (!g) continue;
-        if (g.buttonHome.isPressed) { *home = 1; if (!*holder) *holder = c; }
-        *a |= g.buttonA.isPressed; *b |= g.buttonB.isPressed;
-    }
-    for (s2_pad *d = dm_switch2_pads(); d; d = d->next) { if (s2_pad_home(&d->st)) *home = 1; s2_pad_ab(&d->st, a, b); }   // Switch 2 controllers: no GCController, so no holder (the prompt shows the default A / B symbols)
-    for (jc1_pad *d = g_jc1_pads; d; d = d->next) { if (jc1_pad_home(d)) *home = 1; jc1_pad_ab(d, a, b); }   // original Joy-Cons read from HID (pad_jc1_mac.h)
-    for (hid_pad *d = g_hidpads; d; d = d->next) {
-        uint32_t q = hidpad_quit_buttons(d);
-        *home |= !!(q & HIDPAD_QUIT_HOME); *a |= !!(q & HIDPAD_QUIT_A); *b |= !!(q & HIDPAD_QUIT_B);
-    }
+static unsigned hq_pad_bits(uint64_t m, int32_t x, int32_t y) {
+    return (m & DM_BTN_Y ? HQ_Y : 0) | (m & DM_BTN_PLUS ? HQ_PLUS : 0) |
+        (m & DM_BTN_L ? HQ_L : 0) | (m & DM_BTN_R ? HQ_R : 0) |
+        (m & DM_BTN_LEFT || x < -DM_STICK_MAX*HQ_STICK ? HQ_LEFT : 0) |
+        (m & DM_BTN_RIGHT || x > DM_STICK_MAX*HQ_STICK ? HQ_RIGHT : 0) |
+        (m & DM_BTN_UP || y > DM_STICK_MAX*HQ_STICK ? HQ_UP : 0) |
+        (m & DM_BTN_DOWN || y < -DM_STICK_MAX*HQ_STICK ? HQ_DOWN : 0) |
+        (m & ~(DM_BTN_Y|DM_BTN_PLUS|DM_BTN_LEFT|DM_BTN_RIGHT|DM_BTN_UP|DM_BTN_DOWN|DM_BTN_L|DM_BTN_R) ? HQ_OTHER : 0);
 }
-static void hq_pad_dirs(uint64_t m, int32_t y, int *up, int *down) {
-    *up |= !!(m & DM_BTN_UP) || y > DM_STICK_MAX * HQ_STICK;
-    *down |= !!(m & DM_BTN_DOWN) || y < -DM_STICK_MAX * HQ_STICK;
-}
-static void hq_dirs(int *up, int *down) {
+static unsigned hq_buttons(int *menu_player) {
+    unsigned bits = 0; *menu_player = -1;
     for (GCController *c in GCController.controllers) {
         GCExtendedGamepad *g = c.extendedGamepad;
-        *up |= g.dpad.up.isPressed || g.leftThumbstick.yAxis.value > HQ_STICK;
-        *down |= g.dpad.down.isPressed || g.leftThumbstick.yAxis.value < -HQ_STICK;
+        GCControllerButtonInput *home = g.buttonHome ?: c.physicalInputProfile.buttons[GCInputButtonHome];
+        if (home.isPressed) bits |= HQ_HOME;
+        if (!g || pad_gc_unread(c)) continue;
+        if (g.buttonMenu.isPressed) { bits |= HQ_PLUS; *menu_player = g_merge ? 0 : pad_slot_of(&g_slots,(__bridge const void *)c); }
+        bits |= (g.buttonA.isPressed ? HQ_A : 0) | (g.buttonB.isPressed ? HQ_B : 0) | (g.buttonY.isPressed ? HQ_Y : 0) |
+            (g.leftShoulder.isPressed ? HQ_L : 0) | (g.rightShoulder.isPressed ? HQ_R : 0) |
+            (g.dpad.left.isPressed || g.leftThumbstick.xAxis.value < -HQ_STICK ? HQ_LEFT : 0) |
+            (g.dpad.right.isPressed || g.leftThumbstick.xAxis.value > HQ_STICK ? HQ_RIGHT : 0) |
+            (g.dpad.up.isPressed || g.leftThumbstick.yAxis.value > HQ_STICK ? HQ_UP : 0) |
+            (g.dpad.down.isPressed || g.leftThumbstick.yAxis.value < -HQ_STICK ? HQ_DOWN : 0) |
+            (g.buttonX.isPressed || g.buttonOptions.isPressed || g.leftTrigger.value>.25f || g.rightTrigger.value>.25f ||
+             g.leftThumbstickButton.isPressed || g.rightThumbstickButton.isPressed ||
+             fabs(g.rightThumbstick.xAxis.value)>HQ_STICK || fabs(g.rightThumbstick.yAxis.value)>HQ_STICK ? HQ_OTHER : 0);
     }
     for (s2_pad *d = dm_switch2_pads(); d; d = d->next) {
-        uint64_t m; int32_t s[4]; if (s2_pad_input(&d->st, &m, s)) hq_pad_dirs(m, s[1], up, down);
+        int a=0,b=0; s2_pad_ab(&d->st,&a,&b);
+        bits |= (a ? HQ_A : 0) | (b ? HQ_B : 0) | (s2_pad_home(&d->st) ? HQ_HOME : 0);
+        uint64_t m; int32_t s[4];
+        if (s2_pad_input(&d->st,&m,s)) { bits |= hq_pad_bits(m,s[0],s[1]); if (m & DM_BTN_PLUS) *menu_player = s2pad_player(d); }
     }
     for (jc1_pad *d = g_jc1_pads; d; d = d->next) {
-        uint64_t m; int32_t s[4]; if (jc1_pad_state(d, &m, s)) hq_pad_dirs(m, s[1], up, down);
+        int a=0,b=0; jc1_pad_ab(d,&a,&b);
+        bits |= (a ? HQ_A : 0) | (b ? HQ_B : 0) | (jc1_pad_home(d) ? HQ_HOME : 0);
+        uint64_t m; int32_t s[4];
+        if (jc1_pad_state(d,&m,s)) { bits |= hq_pad_bits(m,s[0],s[1]); if (m & DM_BTN_PLUS) *menu_player = jc1pad_player(d); }
     }
-    for (hid_pad *d = g_hidpads; d; d = d->next) hidpad_menu_dirs(d, up, down, DM_STICK_MAX * HQ_STICK);
+    for (hid_pad *d = g_hidpads; d; d = d->next) {
+        uint32_t q = hidpad_quit_buttons(d);
+        bits |= (q & HIDPAD_QUIT_HOME ? HQ_HOME : 0) | (q & HIDPAD_QUIT_A ? HQ_A : 0) | (q & HIDPAD_QUIT_B ? HQ_B : 0);
+        int up=0,down=0, full=hidpad_full(d); int32_t s[4];
+        pad_hid_sticks(&d->st,s);
+        uint64_t m = full ? d->pro_m : pad_hid_buttons(&d->st);
+        if (d->st.layout != PAD_HID_NINTENDO && !full) bits |= (m & DM_BTN_A ? HQ_A : 0) | (m & DM_BTN_B ? HQ_B : 0);
+        hidpad_menu_dirs(d,&up,&down,DM_STICK_MAX*HQ_STICK);
+        bits |= hq_pad_bits(m,full ? d->pro_s[0] : s[0],full ? d->pro_s[1] : s[1]) | (up ? HQ_UP : 0) | (down ? HQ_DOWN : 0);
+        if (m & DM_BTN_PLUS) *menu_player = hidpad_player(d);
+    }
+    return bits;
 }
 static void hq_fade(NSView *v, int in) {
     if (!v) return;
+    if (NSWorkspace.sharedWorkspace.accessibilityDisplayShouldReduceMotion) { if (!in) [v removeFromSuperview]; return; }
     if (in) v.alphaValue = 0;
     [NSAnimationContext runAnimationGroup:^(NSAnimationContext *ctx) { ctx.duration = 0.18; v.animator.alphaValue = in ? 1 : 0; }
                         completionHandler:^{ if (!in) [v removeFromSuperview]; }];
 }
 static void hq_tick(void) {
     hq_phase p = g_hq.phase;
-    int want = g_input_on && (p == HQ_HOLDING || (g_hq.menu && (p == HQ_MENU || p == HQ_PROMPT || p == HQ_SETTLE)));
+    int want = g_input_on && (p == HQ_HOLDING || hq_visible(p) || p == HQ_SETTLE);
     if (want && !g_hq_timer) g_hq_timer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *t) { (void)t; hq_poll(); }];
     if (!want && g_hq_timer) { [g_hq_timer invalidate]; g_hq_timer = nil; }
 }
 static void hq_hide_hold(void) { [g_hq_hold removeFromSuperview]; g_hq_hold = nil; g_hq_ring = nil; }
-static void hq_hide_prompt(void) { hq_fade(g_hq_prompt, 0); g_hq_prompt = nil; }
-static void hq_select(int row);
-static void hq_show_menu(void) {
-    NSView *cv = g_win.contentView;
-    NSArray *labels = @[@(g_hq_text[HQ_TEXT_RESUME]), @(g_hq_text[HQ_TEXT_CONSOLE]), @(g_hq_text[HQ_TEXT_QUIT])];
-    NSView *menu = hq_menu_view(cv.bounds, @(g_hq_text[HQ_TEXT_MENU_TITLE]), labels, g_hq.sel, ^(NSInteger row) { hq_select((int)row); });
-    [g_hq_menu removeFromSuperview]; g_hq_menu = menu;
-    [cv addSubview:menu];
+static int hq_count(void) {
+    if (g_hq.tab >= OV_PROFILE) return 0;
+    return g_hq.phase == HQ_QUICK || g_hq.tab ? HQ_POWER + !g_hq.no_hold : 1 + g_hq_arcane + !g_hq.no_hold;
 }
-static void hq_hide_menu(void) { [g_hq_menu removeFromSuperview]; g_hq_menu = nil; }
-static void hq_changed(hq_phase was, hq_phase now, GCController *holder) {
-    if (was == HQ_HOLDING) hq_hide_hold();
+static void hq_action(NSInteger action, NSInteger index);
+static void hq_hide(void) {
+    [g_hq_view removeFromSuperview]; g_hq_view = nil;
+    [g_hq_blur removeFromSuperview]; g_hq_blur = nil;
+    hud_layout();
+}
+static void hq_show(void) {
+    if (!hq_visible(g_hq.phase)) return;
     NSView *cv = g_win.contentView;
-    switch (now) {
-    case HQ_HOLDING:
-        g_hq_holder = holder;
-        break;
-    case HQ_MENU:
-        pads_release(); keys_touch_release();
-        dm_focus_set(2);
-        hq_show_menu();
-        LOG("front end: Home pressed, Home menu open");
-        break;
-    case HQ_PROMPT: {
-        hq_hide_menu();
-        g_hq_menu_quit = was == HQ_MENU;
-        pads_release();   // nothing the game held stays pressed while the prompt has the controllers
-        if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
-        dm_focus_set(2);
-        GCExtendedGamepad *g = (g_hq_menu_quit ? g_hq_holder : holder).extendedGamepad;
-        g_hq_prompt = hq_prompt_view(cv.bounds, @(g_hq_text[HQ_TEXT_TITLE]), @(g_hq_text[HQ_TEXT_NOTE]), @(g_hq_text[HQ_TEXT_QUIT]), @(g_hq_text[HQ_TEXT_CANCEL]),
-                                     g.buttonA.sfSymbolsName, g.buttonB.sfSymbolsName);
-        [cv addSubview:g_hq_prompt]; hq_fade(g_hq_prompt, 1);
-        LOG("front end: %s, quit prompt open", was == HQ_MENU ? "Quit chosen in the Home menu" : "Home held");
-        break;
+    if (g_hq.phase == HQ_FULL && !g_hq_blur) {
+        g_hq_blur = [[NSVisualEffectView alloc] initWithFrame:cv.bounds];
+        g_hq_blur.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        g_hq_blur.blendingMode = NSVisualEffectBlendingModeWithinWindow;
+        g_hq_blur.material = NSVisualEffectMaterialHUDWindow;
+        g_hq_blur.state = NSVisualEffectStateActive;
+        g_hq_blur.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+        [cv addSubview:g_hq_blur];
+    } else if (g_hq.phase != HQ_FULL) {
+        [g_hq_blur removeFromSuperview]; g_hq_blur = nil;
     }
-    case HQ_SETTLE:
-        hq_hide_menu(); hq_hide_prompt(); dm_focus_set(1);
-        LOG("front end: %s closed, the game goes on", was == HQ_MENU ? "Home menu" : "quit prompt");
-        break;
-    case HQ_IDLE:
-        g_hq_holder = nil;
-        if (was == HQ_SETTLE) pads_reread();   // the game reads the controllers again, as they are now
-        break;
-    case HQ_QUIT:
-        LOG("front end: quit from the Home button prompt");
-        [NSApp terminate:nil];   // as ⌘Q
-        break;
-    case HQ_PAUSED:
-        hq_hide_menu(); g_hq_holder = nil;
-        bg_enter();
-        break;
+    NSMutableArray *pads = [NSMutableArray array];
+    for (GCController *c in GCController.controllers)
+        if (c.extendedGamepad && !pad_gc_unread(c)) [pads addObject:c.vendorName ?: @"Controller"];
+    for (hid_pad *p = g_hidpads; p; p = p->next) if (hidpad_player(p) >= 0) [pads addObject:@(p->name)];
+    for (jc1_pad *p = g_jc1_pads; p; p = p->next) if (jc1pad_player(p) >= 0) [pads addObject:@(p->name)];
+    for (s2_pad *p = dm_switch2_pads(); p; p = p->next) [pads addObject:@(p->name)];
+    BOOL fr = g_ov_fr;
+    NSArray *pos = @[@"Top left",@"Top right",@"Bottom left",@"Bottom right"], *sizes = @[@"Small",@"Medium",@"Large"];
+    NSMutableArray *actions = [NSMutableArray arrayWithObject:@(g_hq_text[HQ_TEXT_RESUME])];
+    if (g_hq_arcane) [actions addObject:@(g_hq_text[HQ_TEXT_CONSOLE])];
+    if (!g_hq.no_hold) [actions addObject:@(g_hq_text[HQ_TEXT_QUIT])];
+    long minutes = (long)((CACurrentMediaTime()-g_ov_started)/60);
+    NSString *session = minutes >= 60 ? [NSString stringWithFormat:@"%ld h %ld min",minutes/60,minutes%60] :
+        [NSString stringWithFormat:@"%ld min",minutes];
+    NSMutableDictionary *d = [@{@"fr":@(fr), @"title":@(g_hq_text[HQ_TEXT_MENU_TITLE]), @"session":session,
+        @"clock":[NSDateFormatter localizedStringFromDate:NSDate.date dateStyle:NSDateFormatterNoStyle timeStyle:NSDateFormatterShortStyle],
+        @"controllers":[NSString stringWithFormat:@"%lu %@",(unsigned long)pads.count,ov_text(fr,@"connected")],
+        @"controllerNames":pads, @"actions":actions, @"canQuit":@(!g_hq.no_hold),
+        @"resume":@(g_hq_text[HQ_TEXT_RESUME]), @"quitTitle":@(g_hq_text[HQ_TEXT_TITLE]), @"quitLabel":@(g_hq_text[HQ_TEXT_QUIT]),
+        @"quitNote":@(g_hq_text[HQ_TEXT_NOTE]), @"cancel":@(g_hq_text[HQ_TEXT_CANCEL]), @"preset":@(g_hud.preset),
+        @"position":ov_text(fr,pos[g_hud.position]), @"size":ov_text(fr,sizes[g_hud.size]),
+        @"opacity":[NSString stringWithFormat:@"%d %%",ov_hud_opacity[g_hud.opacity]],
+        @"scope":ov_text(fr,g_hud.local ? @"For this game" : @"For all games"),
+        @"volume":[NSString stringWithFormat:@"%d %%",g_ov_volume],
+        @"ldn":ov_text(fr,dm_net_in_local_room() ? @"LDN room active" : dm_net_ldn_enabled() ? @"LDN enabled" : @"LDN disabled")
+    } mutableCopy];
+    d[@"cover"] = g_ov_cover; d[@"total"] = ov_env("DM_OVERLAY_PLAY_TIME");
+    d[@"social"] = g_ov_social;
+    if (g_ov_help_visible) {
+        if (@available(macOS 27.0,*)) d[@"homeHelp"] = fr ?
+            @"Pour utiliser Home ici : Réglages Système → Manettes de jeu → Bouton principal → ajoute ce jeu" :
+            @"To use Home here: System Settings → Game Controllers → Home Button → add this game";
+        else d[@"homeHelp"] = fr ?
+            @"Pour utiliser Home ici : Réglages Système → Manettes de jeu → Raccourcis de manette" :
+            @"To use Home here: System Settings → Game Controllers → Controller Shortcuts";
+    }
+    char username[33]; int online;
+    if (dm_net_nextendo_enabled() && dm_nextendo_login_display(username,&online)) {
+        d[@"nextendo"] = [NSString stringWithFormat:@"%s · %@",username,ov_text(fr,online > 0 ? @"Online play allowed" : online == 0 ? @"Online play unavailable" : @"Signed in")];
+        d[@"onlineAllowed"] = @(online > 0);
+    }
+    d[@"network"] = g_ov_vpn; d[@"vpnUp"] = @(g_ov_vpn && ![g_ov_vpn isEqual:ov_text(fr,@"VPN not detected")]);
+    BOOL first = !g_hq_view;
+    [g_hq_view removeFromSuperview];
+    g_hq_view = ov_view(cv.bounds,g_hq,d,g_ov_theme,^(NSInteger action, NSInteger index) { hq_action(action,index); });
+    [cv addSubview:g_hq_view]; hud_layout();
+    if (first) {
+        hq_fade(g_hq_view,1);
+        NSAccessibilityPostNotification(g_hq_view, NSAccessibilityLayoutChangedNotification);
     }
 }
-static void hq_select(int row) {
-    if (g_hq.phase != HQ_MENU) return;
-    hq_choose(&g_hq, row);
-    hq_changed(HQ_MENU, g_hq.phase, nil);
+static void hq_changed(hq_phase was) {
+    hq_phase next = g_hq.phase;
+    if (was == HQ_HOLDING && next != was) hq_hide_hold();
+    if (hq_visible(next)) {
+        if (!hq_visible(was)) {
+            pads_release(); keys_touch_release(); [NSCursor setHiddenUntilMouseMoves:NO];
+            BOOL exposes_home = NO;
+            for (GCController *c in GCController.controllers)
+                exposes_home |= c.extendedGamepad.buttonHome != nil || c.physicalInputProfile.buttons[GCInputButtonHome] != nil;
+            if (!g_ov_help_once && exposes_home && (g_ov_home_system || !g_ov_home_seen)) {
+                g_ov_help_visible = g_ov_help_once = YES;
+            }
+            char adapter[IF_NAMESIZE]; BOOL fr=g_ov_fr;
+            g_ov_vpn = dm_net_vpn() ? ov_text(fr, dm_net_vpn_adapter(adapter) ?
+                (!strncmp(adapter,"zt",2) ? @"ZeroTier connected" : @"VPN connected") : @"VPN not detected") : nil;
+        }
+        hq_show();
+    } else {
+        g_ov_help_visible = NO;
+        if (hq_visible(was)) hq_hide();
+        if (next == HQ_IDLE && was == HQ_SETTLE) pads_reread();
+        if (next == HQ_QUIT) [NSApp terminate:nil];
+        if (next == HQ_PAUSED) bg_enter();
+    }
     hq_tick();
 }
+static int hq_clamp(int v, int max) { return v < 0 ? 0 : v > max ? max : v; }
+static void hq_adjust(int step) {
+    if (g_hq.card == HQ_VOLUME) {
+        g_ov_volume = hq_clamp(g_ov_volume + 5*step,100); dm_audio_game_volume(g_ov_volume);
+    } else if (g_hq.card == HQ_HUD) {
+        switch (g_hq.row) {
+        case 0: g_hud = ov_hud_preset(hq_clamp(g_hud.preset+step,3),g_hud.local); break;
+        case 1: g_hud.position = hq_clamp(g_hud.position+step,3); break;
+        case 2: g_hud.size = hq_clamp(g_hud.size+step,2); break;
+        case 3: g_hud.opacity = hq_clamp(g_hud.opacity+step,4); break;
+        case 4: g_hud.local = !g_hud.local; break;
+        }
+        ov_hud_save(g_hud_store,g_ov_game,g_hud); hud_apply();
+    }
+}
+static void hq_action(NSInteger action, NSInteger index) {
+    hq_phase was = g_hq.phase;
+    if (!hq_visible(was)) return;
+    switch (action) {
+    case OV_BACK: hq_back(&g_hq); break;
+    case OV_FULL: if (!g_hq.confirm) hq_open(&g_hq,HQ_FULL); break;
+    case OV_TAB: if (!g_hq.confirm) { g_hq.tab=(int)index; g_hq.selection=0; g_hq.card=-1; g_hq.row=0; } break;
+    case OV_CONFIRM:
+        if (g_hq.confirm) { if (index == 1 && !g_hq.no_hold) g_hq.phase=HQ_QUIT; else hq_back(&g_hq); }
+        break;
+    case OV_MAIN:
+        if (g_hq.confirm || index < 0 || index >= hq_count()) return;
+        g_hq.selection=(int)index; g_hq.row=0;
+        if (was==HQ_QUICK || g_hq.tab) {
+            if (index==HQ_POWER) g_hq.confirm=1;
+            else g_hq.card=(int)index;
+        } else if (!index) g_hq.phase=HQ_SETTLE;
+        else if (index==1 && g_hq_arcane) g_hq.phase=HQ_PAUSED;
+        else if (!g_hq.no_hold) g_hq.confirm=1;
+        break;
+    case OV_ROW:
+        g_hq.row=(int)(index<0 ? -index-1 : index); hq_adjust(index<0 ? -1 : 1); break;
+    case OV_PRESET:
+        if (g_hq.card==HQ_HUD && index>=0 && index<4) {
+            g_hq.row=0; g_hud=ov_hud_preset((int)index,g_hud.local); ov_hud_save(g_hud_store,g_ov_game,g_hud); hud_apply();
+        }
+        break;
+    }
+    hq_changed(was);
+}
+static void hq_nav(unsigned nav) {
+    if (!hq_visible(g_hq.phase)) return;
+    int horizontal = !!(nav&HQ_RIGHT)-!!(nav&HQ_LEFT), vertical=!!(nav&HQ_DOWN)-!!(nav&HQ_UP);
+    if (nav&HQ_A) {
+        if (g_hq.confirm) hq_action(OV_CONFIRM,g_hq.row);
+        else if (g_hq.card < 0) hq_action(OV_MAIN,g_hq.selection);
+        else if (g_hq.card<=HQ_VOLUME) hq_action(OV_ROW,g_hq.row);
+        return;
+    }
+    if (g_hq.confirm) g_hq.row=hq_clamp(g_hq.row+horizontal+vertical,1);
+    else if (g_hq.phase==HQ_FULL && (nav&(HQ_L|HQ_R))) {
+        NSArray<NSNumber *> *tabs=ov_tabs(g_ov_social);
+        int i=(int)[tabs indexOfObject:@(g_hq.tab)]+!!(nav&HQ_R)-!!(nav&HQ_L);
+        hq_action(OV_TAB,tabs[hq_clamp(i,(int)tabs.count-1)].intValue); return;
+    }
+    else if (g_hq.card>=0) {
+        if (g_hq.card==HQ_HUD && vertical) g_hq.row=hq_clamp(g_hq.row+vertical,4);
+        if (horizontal) hq_adjust(horizontal);
+    } else if (hq_count()) g_hq.selection=hq_clamp(g_hq.selection+(g_hq.tab ? vertical : horizontal ? horizontal : vertical),hq_count()-1);
+    hq_show();
+}
 static int hq_menu_key(unsigned short code, int down) {
-    if (g_hq.phase == HQ_PROMPT && g_hq_menu_quit) {
-        if (down && (code == 53 || code == 40 || code == 36 || code == 38)) {
-            g_hq.phase = code == 53 || code == 40 ? HQ_SETTLE : HQ_QUIT;
-            hq_changed(HQ_PROMPT, g_hq.phase, nil);
-            hq_tick();
-        }
-        return 1;
+    if (g_hq.disabled) return 0;
+    if (down) [g_ov_keys_down addIndex:code]; else [g_ov_keys_down removeIndex:code];
+    BOOL hot = code==g_ov_keys[0] || code==g_ov_keys[1];
+    hq_phase was=g_hq.phase;
+    if (down && hot) {
+        hq_key_open(&g_hq,code==g_ov_keys[0] ? HQ_QUICK : HQ_FULL);
+        if (was!=g_hq.phase) hq_changed(was);
     }
-    if (g_hq.phase != HQ_MENU) return 0;
-    if (down) {
-        if (code == 126 || code == 125) {
-            int was = g_hq.sel;
-            hq_move(&g_hq, code == 126, code == 125); if (was != g_hq.sel) hq_show_menu();
-        }
-        else if (code == 53 || code == 40) hq_select(HQ_ROW_RESUME);   // Escape or K (B)
-        else if (code == 36 || code == 38) hq_select(g_hq.sel);       // Return or J (A)
+    else if (down && hq_visible(was)) switch (code) {
+        case 53: case 40: hq_action(OV_BACK,0); break;
+        case 36: case 38: hq_nav(HQ_A); break;
+        case 123: hq_nav(HQ_LEFT); break; case 124: hq_nav(HQ_RIGHT); break;
+        case 126: hq_nav(HQ_UP); break;   case 125: hq_nav(HQ_DOWN); break;
+        case 34: if (was==HQ_QUICK) hq_action(OV_FULL,0); break;
+        case 12: hq_nav(HQ_L); break; case 14: hq_nav(HQ_R); break;
     }
-    return 1;
+    if (g_hq.phase==HQ_SETTLE) hq_poll();
+    return hot || hq_blocks_input(was);
 }
 static void hq_poll(void) {
-    static int busy; if ((!g_hq.menu && g_hq.no_hold) || !g_win || !g_input_on || busy) return;
+    static int busy;
+    if (g_hq.disabled || !g_win || !g_input_on || busy || cp_blocks_input(g_cp.phase)) return;
     busy = 1;
-    int home, a, b, up = 0, down = 0; GCController *holder = nil; hq_buttons(&home, &a, &b, &holder);
-    if (g_hq.menu && (g_hq.phase == HQ_MENU || g_hq.phase == HQ_HOLDING)) hq_dirs(&up, &down);
+    int player, tap;
+    unsigned buttons = hq_buttons(&player);
+    if (buttons & HQ_HOME) g_ov_home_seen = YES;
+    if (g_hq.phase == HQ_SETTLE && g_ov_keys_down.count) buttons |= HQ_OTHER;
     double now = CACurrentMediaTime();
-    int sel = g_hq.sel;
-    hq_phase was = g_hq.phase, ph = hq_step_nav(&g_hq, now, home, a, b, up, down);
-    if (ph != was) hq_changed(was, ph, holder);
-    else if (ph == HQ_MENU && sel != g_hq.sel) hq_show_menu();
+    home_quit was = g_hq;
+    unsigned nav = hq_step(&g_hq,now,buttons,&tap);
+    if (was.phase == HQ_IDLE && g_hq.phase == HQ_HOLDING && g_hq.trigger == HQ_PLUS) g_ov_menu_player = player;
+    if (tap && g_ov_menu_player >= 0) {
+        g_hq_pulse=g_ov_menu_player;
+        unsigned gen=++g_hq_pulse_serial; pads_reread();
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC*65/1000),dispatch_get_main_queue(),^{
+            if (gen==g_hq_pulse_serial) { g_hq_pulse=-1; if (g_input_on && !hq_blocks_input(g_hq.phase)) pads_reread(); }
+        });
+    }
+    if (nav & (HQ_A|HQ_LEFT|HQ_RIGHT|HQ_UP|HQ_DOWN|HQ_L|HQ_R)) hq_nav(nav);
+    else if (was.phase!=g_hq.phase || was.card!=g_hq.card || was.confirm!=g_hq.confirm || was.tab!=g_hq.tab) hq_changed(was.phase);
     double fill = hq_ring(&g_hq, now);
     if (fill >= 0) {
-        if (!g_hq_hold) { NSView *cv = g_win.contentView; CAShapeLayer *ring = nil; g_hq_hold = hq_hold_view(cv.bounds, @(g_hq_text[HQ_TEXT_HOLD]), &ring); g_hq_ring = ring; [cv addSubview:g_hq_hold]; hq_fade(g_hq_hold, 1); }
+        if (!g_hq_hold) {
+            NSView *cv = g_win.contentView; CAShapeLayer *ring = nil;
+            g_hq_hold = hq_hold_view(cv.bounds, @(g_hq_text[HQ_TEXT_HOLD]), &ring);
+            g_hq_ring = ring; ring.strokeColor = [g_ov_theme[@"focus"] CGColor];
+            [cv addSubview:g_hq_hold];
+        }
         hq_hold_set(g_hq_ring, fill);
     }
     hq_tick();
     busy = 0;
 }
 static void hq_close(void) {
-    if (g_hq.phase == HQ_IDLE || g_hq.phase == HQ_QUIT || g_hq.phase == HQ_PAUSED) return;
-    if (g_hq.phase == HQ_PROMPT) LOG("front end: quit prompt closed, the window lost the focus");
-    hq_cancel(&g_hq); hq_hide_hold(); hq_hide_prompt(); hq_hide_menu(); g_hq_holder = nil; hq_tick();
+    g_ov_help_visible = NO;
+    [g_ov_keys_down removeAllIndexes]; g_ov_menu_player = g_hq_pulse = -1; g_hq_pulse_serial++;
+    hq_cancel(&g_hq); hq_hide_hold(); hq_hide(); hq_tick();
 }
 
 // Launcher handoff from NX2Apple 0035 (see home_quit.h). Use the window's normal minimize/restore lifecycle, not a process or network suspend.
@@ -786,7 +1057,7 @@ static void bg_enter(void) {
     });
 }
 static void bg_start(void) {
-    if (!g_hq.menu) return;
+    if (!g_hq_arcane) return;
     NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
     for (NSNotificationName name in @[NSWindowWillEnterFullScreenNotification, NSWindowWillExitFullScreenNotification])
         [nc addObserverForName:name object:g_win queue:nil usingBlock:^(NSNotification *n) {
@@ -866,6 +1137,9 @@ int front_ctrl_support(int min, int max) {
     if (!g_layer) return -1;
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     dispatch_async(dispatch_get_main_queue(), ^{
+        hq_close();
+        if (g_hq.phase == HQ_SETTLE) g_hq.phase = HQ_IDLE;   // the native controller applet now owns input and its own release gate
+        hq_tick();
         keys_touch_release();   // nothing the game held stays pressed while the prompt has the input
         pads_release();
         int a, b; cp_buttons(&a, &b);
@@ -887,7 +1161,6 @@ static void pads_start(void) {
     if (g_press_to_join) LOG("front end: a controller becomes a player at its first button press, the lowest player free (DM_PAD_PRESS_TO_JOIN)");
     hq_start();
     pads_changed(nil);
-    hq_log_setting();
     dm_motion_pro_start(pro_devices_changed);
     dm_jc1_start(g_merge);
     hidpad_start();
@@ -901,10 +1174,16 @@ static void pads_start(void) {
 static _Atomic double g_picture_aspect = 16.0 / 9.0;
 void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = (double)w / h; }
 @interface DmGameView : NSView @end
+// Keep the Metal layer in its own view: AppKit can then sample the sibling behind
+// the visual effect without making the Metal view responsible for AppKit sublayers.
+@interface DmPictureView : NSView @end
+@implementation DmPictureView
+- (NSView *)hitTest:(NSPoint)point { (void)point; return nil; }
+@end
 @implementation DmGameView
 - (void)mouseDown:(NSEvent *)e { [self mouseDragged:e]; }
 - (void)mouseDragged:(NSEvent *)e {
-    if (!g_input_on || g_hq.phase == HQ_MENU) return;
+    if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;
     double w = b.width, h = b.height;
     if (w <= 0 || h <= 0) return;
@@ -917,12 +1196,13 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
 // The drawable follows the view in pixels: a layer assigned to a layer-backed view kept the drawable at the first window's 1280x720 in fullscreen too, so the game picture was
 // scaled down to it and up again by the compositor
 - (void)fitDrawable {
-    CAMetalLayer *l = (CAMetalLayer *)self.layer; if (![l isKindOfClass:CAMetalLayer.class] || !self.window) return;
+    CAMetalLayer *l = g_layer; if (!l || !self.window) return;
+    [CATransaction begin]; [CATransaction setDisableActions:YES]; l.frame = self.bounds; [CATransaction commit];
     l.contentsScale = self.window.backingScaleFactor;
     NSSize px = [self convertSizeToBacking:self.bounds.size]; if (px.width < 1 || px.height < 1 || CGSizeEqualToSize(l.drawableSize, px)) return;
     l.drawableSize = px; LOG("front end: drawable %.0fx%.0f", px.width, px.height);
 }
-- (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; [self fitDrawable]; }
+- (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; [self fitDrawable]; hq_show(); hud_layout(); }
 - (void)viewDidChangeBackingProperties { [super viewDidChangeBackingProperties]; [self fitDrawable]; }
 @end
 
@@ -1833,7 +2113,10 @@ void front_run(void (*guest)(void)) {
         // Apple's HUD over the game (frame rate, frame and GPU time, memory): front_hud_env turns it on before the first device. The layer's developerHUDProperties
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
         if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
-        v.layer = g_layer; [(DmGameView *)v fitDrawable];
+        NSView *picture = [[DmPictureView alloc] initWithFrame:v.bounds];
+        picture.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        picture.layer = g_layer; picture.wantsLayer = YES;
+        [v addSubview:picture]; [(DmGameView *)v fitDrawable];
         [win center];
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);
@@ -1896,13 +2179,14 @@ void front_run(void (*guest)(void)) {
                 if (!c.extendedGamepad || g_merge) LOG("controller %s: %s%s", conn ? "connected" : "disconnected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
                 if (conn) hidpad_gc_connected(c);   // a HID pad of its name that only waited for it (pad_hid_mac.h)
                 pads_changed(conn ? nil : c);
-                if (conn) hq_log_setting(); }];
+            }];
         dm_haptics_apple_init();
         pads_start();
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
             if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed
             if (e.type == NSEventTypeKeyDown && fn_shortcut(e)) return e;   // fn (Globe) + a letter is the system's (fn+F full screen, GitHub issue #873), not the game's F
+            if (hq_visible(g_hq.phase) && ((e.modifierFlags & (NSEventModifierFlagControl|NSEventModifierFlagOption)) == (NSEventModifierFlagControl|NSEventModifierFlagOption))) return e;   // VoiceOver
             if (!e.isARepeat) on_key(e, e.type == NSEventTypeKeyDown);
             return nil;   // Swallow it to avoid the system beep
         }];

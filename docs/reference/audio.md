@@ -1,5 +1,7 @@
 # Audio
 
+The Mac overlay's Game volume is a session-only gain on the host's PCM output. It does not change the system volume or the guest's AudioOut settings; 0% mutes the host output while the queues keep playing. The silent audio sink stays silent.
+
 The audio renderer (`dm/host/hle_audren.c`), AudioOut, audio devices and codecs. Each entry: symptom, cause, fix, the games it was found on. The [symptom index](../agents/symptoms.md) lists every symptom.
 
 ## Audio renderer

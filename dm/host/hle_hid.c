@@ -1283,7 +1283,7 @@ HLE_FORCE("_ZN2nn3hid23GetSceneIdForPrivateAppEv", "private application's HID sc
 
 // A Switch 2 SDK's guard against a Home press made by accident on a controller (Drag x Drive turns it on for player 1's Joy-Con 2 as they connect, main+0x2c80c4). The SDK's own
 // opens the hid service, which the host does not serve, and calls through the null session (sdk+0x63ce10). It sets a flag in hid and returns nothing; the host handles Home itself
-// (home_quit.h: a 2 s hold, then a confirm), so the setting is recorded for the question below and logged, and changes nothing else
+// (home_quit.h: the Mac session overlay), so the setting is recorded for the question below and logged, and changes nothing else
 static _Atomic uint32_t g_home_protect;   // the setting per npad, in id_bit's bits, as the game left it; off until it turns it on
 HLE_FORCE("_ZN2nn3hid41EnableUnintendedHomeButtonInputProtectionERKjb", "Home button protection: recorded and logged, the host handles Home itself", void, h_hid_HomeProtect,
           const uint32_t *id, bool on) {

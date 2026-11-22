@@ -1,5 +1,11 @@
 # Frame rate
 
+## Mac in-game FPS HUD
+
+Quick access → HUD changes the host's own overlay immediately. The default is **Minimal FPS** (top right, small, 50%); **Standard** adds the mean presented frame interval and **Full** also shows its recent history. Values count actual Metal presentations, not guest-submitted frames or GPU execution time; the text is refreshed at most twice per second. The settings are kept separately from `env.txt` and saves, in the `org.nxnative.overlay` macOS preferences suite (`~/Library/Preferences/org.nxnative.overlay.plist`), with title-specific entries overriding the global setting. **For all games** updates the global default and removes the current title's override; other titles keep their overrides.
+
+For Metal/GPU diagnostics, `DM_METAL_HUD=1` still enables Apple's HUD independently at launch. The native FPS HUD adds no GPU draw pass of its own, but its compositor cost and any effect on direct presentation must be checked with real games.
+
 Frame pacing: the host's frame step, engine frame limiters, present intervals and display rates. Each entry: symptom, cause, fix, the games it was found on. The [symptom index](../agents/symptoms.md) lists every symptom.
 
 ## Frame step

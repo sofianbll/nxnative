@@ -33,7 +33,20 @@ static struct {
     NSTimeInterval next_try;    // no fetch before this after a failure
     NSString *access;           // the refresh's access token, and when it was issued
     NSTimeInterval access_at;
+    NSString *username;         // the last successful sign-in, without exposing the credential
 } g_cache = {.lock = PTHREAD_MUTEX_INITIALIZER};
+static _Atomic int g_display_online = -1;   // unknown, denied or allowed by the last online-status reply
+
+int dm_nextendo_login_display(char username[33], int *online) { @autoreleasepool {
+    *username = 0; *online = -1;
+    if (pthread_mutex_trylock(&g_cache.lock)) return 0;
+    NSString *name = g_cache.expires > nxl_now() && g_cache.json ? g_cache.username : nil;
+    const char *text = name.UTF8String; size_t n = text ? strlen(text) : 0;
+    if (n > 32) { n = 32; while (n && ((unsigned char)text[n] & 0xc0) == 0x80) n--; }
+    if (n) { memcpy(username,text,n); username[n]=0; *online=atomic_load(&g_display_online); }
+    pthread_mutex_unlock(&g_cache.lock);
+    return n != 0;
+} }
 
 static void refresh_locked(NSTimeInterval now) {
     NSString *why = nil, *access = nil;
@@ -45,6 +58,9 @@ static void refresh_locked(NSTimeInterval now) {
         return;
     }
     g_cache.json = json; g_cache.expires = [record[@"expires_at"] doubleValue]; g_cache.next_try = 0;
+    NSString *name = record[@"identity"][@"username"];
+    if (![name isEqualToString:g_cache.username]) atomic_store(&g_display_online,-1);
+    g_cache.username = name;
     g_cache.access = access; g_cache.access_at = now;
     fprintf(stderr, "[dm] nextendo: signed in as %s\n", [record[@"identity"][@"username"] UTF8String]);
 }
@@ -88,6 +104,7 @@ NSString *dm_nextendo_login_access(void) { @autoreleasepool {
 void dm_nextendo_login_online_check(const char *when) { @autoreleasepool {
     NSString *token = dm_nextendo_api_bearer("online-status");
     NSString *line;
+    int status = -1;
     if (!token) line = @"[RED] nextendo: online status not asked: no game token (no sign-in, or its refresh failed)";
     else {
         NSMutableURLRequest *get = nxl_request(kNxOnlineStatusEndpoint, 8);
@@ -95,9 +112,10 @@ void dm_nextendo_login_online_check(const char *when) { @autoreleasepool {
         NSString *why = nil;
         dm_guest_host_wait_begin(); NSDictionary *answer = nxl_send(get, &why); dm_guest_host_wait_end();
         if (!answer) line = [NSString stringWithFormat:@"[RED] nextendo: online status could not be asked: %@", why ?: @"no answer"];
-        else if ([answer[@"allow"] isEqual:@YES]) line = @"nextendo: Nextendo allows online play for this account";
-        else line = [@"[RED] nextendo: " stringByAppendingString:nxl_refusal_words(answer[@"reason"])];
+        else if ([answer[@"allow"] isEqual:@YES]) { status = 1; line = @"nextendo: Nextendo allows online play for this account"; }
+        else { if ([answer[@"allow"] isEqual:@NO]) status = 0; line = [@"[RED] nextendo: " stringByAppendingString:nxl_refusal_words(answer[@"reason"])]; }
     }
+    atomic_store(&g_display_online,status);
     static pthread_mutex_t told_lock = PTHREAD_MUTEX_INITIALIZER; static NSString *told;
     pthread_mutex_lock(&told_lock); bool fresh = ![told isEqual:line]; if (fresh) told = line; pthread_mutex_unlock(&told_lock);
     if (fresh) fprintf(stderr, "[dm] %s (%s)\n", line.UTF8String, when ? when : "asked");

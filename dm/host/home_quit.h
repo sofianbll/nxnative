@@ -1,114 +1,87 @@
-// Quit with the Home button (Mac front end, front_mac.m; LNPANDY/NX2Apple#336). Holding Home (the logo button on Xbox and PlayStation pads) for HQ_HOLD_S seconds opens a
-// "Quit?" prompt over the game: A quits (the same exit as ⌘Q), B or a new press of Home closes it. Without the launcher menu, releasing Home early does nothing. A and B are
-// GameController's buttonA and buttonB (by label: the bottom button on an Xbox or PlayStation pad, the one printed A on a Nintendo pad), not the Switch buttons the game
-// gets. Pure, so tests/t_home_quit.c checks it without a controller or a window.
-//
-// The hold works wherever the press reaches the host: pad_keep_system_buttons claims Home on every pad (preferredSystemGestureState = GCSystemGestureStateDisabled), and
-// macOS 27 respects the claim when the Home button setting for apps lets the app decide (front_mac.m logs the setting). When the system takes Home anyway (it opens the
-// Games app or the player's chosen app), the game window loses the focus and whatever was shown closes (hq_cancel). DM_HOME_QUIT=0 turns it off. A front end passes the
-// texts in the player's language as DM_HOME_QUIT_TEXT (hq_text_line, docs/frontends.md), English otherwise.
-// Home menu adapted from NX2Apple patch 0035 (MIT, Copyright (c) 2026 LNPANDY and NX2Apple contributors):
-// https://github.com/LNPANDY/NX2Apple/blob/7541e9e2f15b8beda26ff5d7b405e234e4015ed2/patches/0035-mac-home-menu-and-background-pause.patch
+// Mac overlay input, independent of AppKit and controller APIs. Home menu
+// originally adapted from NX2Apple patch 0035 (MIT, Copyright 2026 LNPANDY and contributors).
 #pragma once
-#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
-#define HQ_HOLD_S 2.0    // how long Home is held before the prompt opens
-#define HQ_RING_S 0.3    // the hold indicator shows only after this
-#define HQ_TAP_S 0.5     // releasing Home before this opens the opted-in menu
-#define HQ_STICK 0.5     // fraction of vertical stick travel that acts as a menu direction
+#define HQ_HOLD_S 0.5
+#define HQ_STICK 0.5
 
-typedef enum {
-    HQ_IDLE,      // nothing shown, the game has its input
-    HQ_HOLDING,   // Home is held: the indicator fills up
-    HQ_PROMPT,    // the prompt is open: the game gets no controller input
-    HQ_SETTLE,    // the prompt was closed: the game gets controller input again once Home, A and B are all up, so the B that closed it never reaches the game
-    HQ_QUIT,      // A was pressed in the prompt: the front end quits (final)
-    HQ_MENU,      // short Home: Resume, Back to console mode, Quit
-    HQ_PAUSED,    // Back to console mode was selected: input stays blocked until resumed
-} hq_phase;
-
-enum { HQ_ROW_RESUME, HQ_ROW_CONSOLE, HQ_ROW_QUIT, HQ_ROWS };
-
+typedef enum { HQ_IDLE, HQ_HOLDING, HQ_QUICK, HQ_FULL, HQ_SETTLE, HQ_QUIT, HQ_PAUSED } hq_phase;
+enum { HQ_HOME = 1, HQ_PLUS = 2, HQ_A = 4, HQ_B = 8, HQ_Y = 16,
+       HQ_LEFT = 32, HQ_RIGHT = 64, HQ_UP = 128, HQ_DOWN = 256, HQ_L = 512, HQ_R = 1024, HQ_OTHER = 2048 };
+enum { HQ_HUD, HQ_VOLUME, HQ_PADS, HQ_NETWORK, HQ_POWER };
 typedef struct {
     hq_phase phase;
-    double since;     // when the hold started (seconds, any clock that only goes forward)
-    int home;         // Home was down at the last step (a press is a change from up to down)
-    int a_up, b_up;   // A and B have been up since the prompt opened: a button already held when it opens does not count
-    int menu, no_hold; // launcher opt-in and DM_HOME_QUIT=0, respectively
-    int up, down, sel; // previous direction state (only a new press moves) and selected menu row
+    double since;
+    unsigned buttons, trigger;
+    int disabled, no_hold;
+    int selection, card, row, tab, confirm;
 } home_quit;
 
-// Whether the hold does anything: on unless DM_HOME_QUIT=0 (env: its value, NULL when unset)
 static inline int hq_enabled(const char *env) { return !(env && !strcmp(env, "0")); }
 static inline int hq_menu_enabled(const char *launcher, const char *menu) { return launcher && !strcmp(launcher, "1") && hq_enabled(menu); }
-
-static inline void hq_choose(home_quit *q, int row) {
-    if (row == HQ_ROW_RESUME) q->phase = HQ_SETTLE;
-    else if (row == HQ_ROW_CONSOLE) q->phase = HQ_PAUSED;
-    else if (row == HQ_ROW_QUIT) { q->phase = HQ_PROMPT; q->a_up = 0; }   // the A that chose Quit does not confirm it
+static inline int hq_visible(hq_phase p) { return p == HQ_QUICK || p == HQ_FULL; }
+static inline int hq_blocks_input(hq_phase p) { return p != HQ_IDLE && p != HQ_HOLDING; }
+static inline void hq_open(home_quit *q, hq_phase phase) {
+    q->phase = phase; q->selection = q->row = q->tab = q->confirm = 0; q->card = -1;
 }
-static inline void hq_move(home_quit *q, int up, int down) {
-    if (up && !down && q->sel > 0) q->sel--;
-    if (down && !up && q->sel < HQ_ROWS - 1) q->sel++;
+static inline void hq_back(home_quit *q) {
+    if (q->confirm) { q->confirm = 0; q->row = 0; }
+    else if (q->card >= 0) { q->card = -1; q->row = 0; }
+    else if (q->tab) { q->tab = 0; q->selection = 0; }
+    else q->phase = HQ_SETTLE;
+}
+static inline void hq_key_open(home_quit *q, hq_phase phase) {
+    if (!q->disabled && q->phase != HQ_PAUSED && q->phase != HQ_QUIT && q->phase != HQ_SETTLE && q->phase != phase)
+        hq_open(q, phase);
 }
 
-// One step with the buttons as they are now (pressed on any controller) at time now. Called on every change of a button and, while Home is held, from a timer.
-static inline hq_phase hq_step_nav(home_quit *q, double now, int home, int a, int b, int up, int down) {
-    int pressed = home && !q->home, moved_up = up && !q->up, moved_down = down && !q->down;
-    q->home = home; q->up = up; q->down = down;
+// Returns new navigation presses only when the overlay was already open.
+// Menu short taps remain guest input; the host sends them when Menu is released.
+static inline unsigned hq_step(home_quit *q, double now, unsigned buttons, int *menu_tap) {
+    unsigned down = buttons & ~q->buttons; q->buttons = buttons; *menu_tap = 0;
+    if (q->disabled) return 0;
     switch (q->phase) {
-    case HQ_IDLE:
-        if (pressed) { q->phase = HQ_HOLDING; q->since = now; }
-        break;
-    case HQ_HOLDING:
-        if (!home) {
-            if (q->menu && now - q->since < HQ_TAP_S) { q->phase = HQ_MENU; q->sel = HQ_ROW_RESUME; q->a_up = !a; q->b_up = !b; }
-            else q->phase = HQ_IDLE;
-        } else if (!q->no_hold && now - q->since >= HQ_HOLD_S) { q->phase = HQ_PROMPT; q->a_up = !a; q->b_up = !b; }
-        break;
-    case HQ_MENU:
-        if (!a) q->a_up = 1;
-        if (!b) q->b_up = 1;
-        if ((b && q->b_up) || pressed) q->phase = HQ_SETTLE;
-        else if (a && q->a_up) hq_choose(q, q->sel);
-        else hq_move(q, moved_up, moved_down);
-        break;
-    case HQ_PROMPT:
-        if (!a) q->a_up = 1;
-        if (!b) q->b_up = 1;
-        if ((b && q->b_up) || pressed) q->phase = HQ_SETTLE;   // B or Home closes it; with A and B at once the safe one wins
-        else if (a && q->a_up) q->phase = HQ_QUIT;
-        break;
-    case HQ_SETTLE:
-        if (!home && !a && !b) q->phase = HQ_IDLE;
-        break;
-    case HQ_QUIT:
-    case HQ_PAUSED:
+    case HQ_IDLE: {
+        unsigned trigger = down & HQ_HOME ? HQ_HOME : down & HQ_PLUS && !q->no_hold ? HQ_PLUS : 0;
+        if (trigger) { q->since = now; q->trigger = trigger; q->phase = HQ_HOLDING; }
         break;
     }
-    return q->phase;
+    case HQ_HOLDING:
+        if (!q->no_hold && now >= q->since + HQ_HOLD_S) hq_open(q, HQ_QUICK);
+        else if (!(buttons & q->trigger)) {
+            if (q->trigger == HQ_HOME && now < q->since + HQ_HOLD_S) hq_open(q, HQ_FULL);
+            else { *menu_tap = q->trigger == HQ_PLUS; q->phase = HQ_IDLE; }
+        }
+        break;
+    case HQ_QUICK: case HQ_FULL:
+        if (down & HQ_HOME) q->phase = HQ_SETTLE;
+        else if (down & HQ_B) hq_back(q);
+        else if ((down & HQ_Y) && q->phase == HQ_QUICK && !q->confirm) hq_open(q, HQ_FULL);
+        else return down & ~(HQ_HOME | HQ_PLUS | HQ_B);
+        break;
+    case HQ_SETTLE:
+        if (!buttons) q->phase = HQ_IDLE;
+        break;
+    case HQ_PAUSED: case HQ_QUIT:
+        break;
+    }
+    return 0;
 }
-static inline hq_phase hq_step(home_quit *q, double now, int home, int a, int b) { return hq_step_nav(q, now, home, a, b, 0, 0); }
-
-// The window lost focus (another app, the Games app the system opened for Home): whatever was shown closes. A Home still held needs a new press
-static inline void hq_cancel(home_quit *q) { if (q->phase != HQ_QUIT && q->phase != HQ_PAUSED) { q->phase = HQ_IDLE; q->home = 1; } }
+static inline void hq_cancel(home_quit *q) {
+    if (q->phase != HQ_QUIT && q->phase != HQ_PAUSED) {
+        q->phase = hq_blocks_input(q->phase) ? HQ_SETTLE : HQ_IDLE;
+        q->buttons = HQ_HOME | HQ_PLUS;
+    }
+}
 static inline void hq_resumed(home_quit *q) { if (q->phase == HQ_PAUSED) q->phase = HQ_SETTLE; }
-
-// The game gets no controller input in these phases
-static inline int hq_blocks_input(hq_phase p) { return p != HQ_IDLE && p != HQ_HOLDING; }
-
-// How full the hold indicator is (0 to 1), -1 while it is not shown
 static inline double hq_ring(const home_quit *q, double now) {
-    if (q->phase != HQ_HOLDING || q->no_hold) return -1;
-    double t = (now - q->since - HQ_RING_S) / (HQ_HOLD_S - HQ_RING_S);
-    return t < 0 ? -1 : t > 1 ? 1 : t;
+    return q->phase == HQ_HOLDING && !q->no_hold ? (now - q->since) / HQ_HOLD_S : -1;
 }
 
-// Lines of DM_HOME_QUIT_TEXT: the five quit lines first, then the menu's Resume, Back to console mode and title. Quit is shared.
+// Existing launcher text lines retain their numbering.
 enum { HQ_TEXT_HOLD, HQ_TEXT_TITLE, HQ_TEXT_NOTE, HQ_TEXT_QUIT, HQ_TEXT_CANCEL, HQ_TEXT_RESUME, HQ_TEXT_CONSOLE, HQ_TEXT_MENU_TITLE, HQ_TEXTS };
-// Line i of text into out; an empty or missing line (or no text) gives def. The title's default has the game's name: def is the caller's
 static inline void hq_text_line(const char *text, int i, const char *def, char *out, size_t cap) {
     const char *s = text;
     for (int k = 0; s && k < i; k++) { s = strchr(s, '\n'); if (s) s++; }
@@ -118,10 +91,6 @@ static inline void hq_text_line(const char *text, int i, const char *def, char *
     if (n >= cap) n = cap - 1;
     memcpy(out, s, n); out[n] = 0;
 }
-
-// GameController's Home button setting for apps (GCControllerHomeButtonSettingInAppAction, macOS 27) as the word the log line names it by:
-// "system" (the system keeps Home whatever the app asks), "app" (the app decides), "off" (the system does nothing with Home in apps),
-// "unavailable" (could not be read)
 static inline const char *hq_in_app_name(long v) {
     return v == 0 ? "system" : v == 1 ? "app" : v == -1 ? "unavailable" : v > 1 ? "off" : "unavailable";
 }
