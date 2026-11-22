@@ -571,30 +571,23 @@ static void hud_update(void) {
     uint64_t frames = atomic_exchange_explicit(&g_hud_frames, 0, memory_order_relaxed);
     prior = now;
     if (!g_hud.preset || period > 2 || period <= 0) frames = 0;
+    double fps = frames ? frames/period : 0, ms = fps ? 1000/fps : 0;
+    NSString *graph = nil;
     if (g_hud.preset == 3) {
-        double ms = frames ? 1000 * period / frames : 0;
         static const unichar bars[] = {0x2581,0x2582,0x2583,0x2584,0x2585,0x2586,0x2587,0x2588};
         memmove(history,history+1,sizeof history-sizeof *history);
         history[7] = bars[(int)fmin(7, ms/5)];
         NSUInteger oldest = 0; while (!history[oldest]) oldest++;
-        g_hud_label.stringValue = frames ? [NSString stringWithFormat:@"%.0f FPS  ·  %.1f ms  %@", frames/period, ms,
-            [NSString stringWithCharacters:history+oldest length:8-oldest]] : @"— FPS";
-    } else g_hud_label.stringValue = !frames ? @"— FPS" : g_hud.preset == 1 ? [NSString stringWithFormat:@"%.0f FPS", frames/period] :
-        [NSString stringWithFormat:@"%.0f FPS  ·  %.1f ms", frames/period, 1000*period/frames];
+        graph = [NSString stringWithCharacters:history+oldest length:8-oldest];
+    }
+    g_hud_label.stringValue = ov_fps_text(g_hud.preset,fps,ms,graph);
     hud_layout();
 }
 static void hud_layout(void) {
     NSView *cv = g_win.contentView;
     if (!g_hud_label) return;
     g_hud_label.hidden = !g_hud.preset || g_hq.phase == HQ_FULL;
-    CGFloat k = fmax(.55, fmin(NSWidth(cv.bounds)/1920, NSHeight(cv.bounds)/1080));
-    g_hud_label.font = [NSFont monospacedDigitSystemFontOfSize:(15 + 5*g_hud.size)*k weight:NSFontWeightSemibold];
-    CGFloat w = g_hud_label.intrinsicContentSize.width + 12*k, h = (28 + 5*g_hud.size)*k;
-    CGFloat x = g_hud.position & 1 ? NSWidth(cv.bounds)-64*k-w : 64*k;
-    CGFloat y = g_hud.position & 2 ? 40*k : NSHeight(cv.bounds)-40*k-h;
-    g_hud_label.frame = NSMakeRect(x,y,w,h);
-    g_hud_label.layer.cornerRadius = 8*k;
-    g_hud_label.alphaValue = ov_hud_opacity[g_hud.opacity]/100.0;
+    ov_fps_layout(g_hud_label,cv.bounds,g_hud);
 }
 static void hud_apply(void) {
     int enabled = g_hud.preset != 0;
@@ -774,40 +767,45 @@ static void hq_show(void) {
         [g_hq_blur removeFromSuperview]; g_hq_blur = nil;
     }
     NSMutableArray *pads = [NSMutableArray array];
+    void (^pad)(NSString *, int) = ^(NSString *name, int slot) {
+        [pads addObject:@{@"name":name ?: @"Controller",@"player":@(slot+1)}];
+    };
     for (GCController *c in GCController.controllers)
-        if (c.extendedGamepad && !pad_gc_unread(c)) [pads addObject:c.vendorName ?: @"Controller"];
-    for (hid_pad *p = g_hidpads; p; p = p->next) if (hidpad_player(p) >= 0) [pads addObject:@(p->name)];
-    for (jc1_pad *p = g_jc1_pads; p; p = p->next) if (jc1pad_player(p) >= 0) [pads addObject:@(p->name)];
-    for (s2_pad *p = dm_switch2_pads(); p; p = p->next) [pads addObject:@(p->name)];
+        if (c.extendedGamepad && !pad_gc_unread(c)) pad(c.vendorName,g_merge ? 0 : pad_slot_of(&g_slots,(__bridge const void *)c));
+    for (hid_pad *p = g_hidpads; p; p = p->next) if (hidpad_player(p) >= 0) pad(@(p->name),hidpad_player(p));
+    for (jc1_pad *p = g_jc1_pads; p; p = p->next) if (jc1pad_player(p) >= 0) pad(@(p->name),jc1pad_player(p));
+    for (s2_pad *p = dm_switch2_pads(); p; p = p->next) pad(@(p->name),s2pad_player(p));
+    [pads sortUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b) {
+        int x=[a[@"player"] intValue] ?: INT_MAX, y=[b[@"player"] intValue] ?: INT_MAX;
+        return x<y ? NSOrderedAscending : x>y ? NSOrderedDescending : [a[@"name"] compare:b[@"name"]];
+    }];
     BOOL fr = g_ov_fr;
     NSArray *pos = @[@"Top left",@"Top right",@"Bottom left",@"Bottom right"], *sizes = @[@"Small",@"Medium",@"Large"];
     NSMutableArray *actions = [NSMutableArray arrayWithObject:@(g_hq_text[HQ_TEXT_RESUME])];
     if (g_hq_arcane) [actions addObject:@(g_hq_text[HQ_TEXT_CONSOLE])];
     if (!g_hq.no_hold) [actions addObject:@(g_hq_text[HQ_TEXT_QUIT])];
+    BOOL ldnActive = dm_net_in_local_room();
     long minutes = (long)((CACurrentMediaTime()-g_ov_started)/60);
     NSString *session = minutes >= 60 ? [NSString stringWithFormat:@"%ld h %ld min",minutes/60,minutes%60] :
         [NSString stringWithFormat:@"%ld min",minutes];
     NSMutableDictionary *d = [@{@"fr":@(fr), @"title":@(g_hq_text[HQ_TEXT_MENU_TITLE]), @"session":session,
         @"clock":[NSDateFormatter localizedStringFromDate:NSDate.date dateStyle:NSDateFormatterNoStyle timeStyle:NSDateFormatterShortStyle],
         @"controllers":[NSString stringWithFormat:@"%lu %@",(unsigned long)pads.count,ov_text(fr,@"connected")],
-        @"controllerNames":pads, @"actions":actions, @"canQuit":@(!g_hq.no_hold),
+        @"controllerRows":pads, @"actions":actions, @"canQuit":@(!g_hq.no_hold),
         @"resume":@(g_hq_text[HQ_TEXT_RESUME]), @"quitTitle":@(g_hq_text[HQ_TEXT_TITLE]), @"quitLabel":@(g_hq_text[HQ_TEXT_QUIT]),
         @"quitNote":@(g_hq_text[HQ_TEXT_NOTE]), @"cancel":@(g_hq_text[HQ_TEXT_CANCEL]), @"preset":@(g_hud.preset),
         @"position":ov_text(fr,pos[g_hud.position]), @"size":ov_text(fr,sizes[g_hud.size]),
         @"opacity":[NSString stringWithFormat:@"%d %%",ov_hud_opacity[g_hud.opacity]],
         @"scope":ov_text(fr,g_hud.local ? @"For this game" : @"For all games"),
         @"volume":[NSString stringWithFormat:@"%d %%",g_ov_volume],
-        @"ldn":ov_text(fr,dm_net_in_local_room() ? @"LDN room active" : dm_net_ldn_enabled() ? @"LDN enabled" : @"LDN disabled")
+        @"ldn":ov_text(fr,ldnActive ? @"LDN room active" : dm_net_ldn_enabled() ? @"LDN enabled" : @"LDN disabled"),
+        @"ldnActive":@(ldnActive)
     } mutableCopy];
     d[@"cover"] = g_ov_cover; d[@"total"] = ov_env("DM_OVERLAY_PLAY_TIME");
     d[@"social"] = g_ov_social;
     if (g_ov_help_visible) {
-        if (@available(macOS 27.0,*)) d[@"homeHelp"] = fr ?
-            @"Pour utiliser Home ici : Réglages Système → Manettes de jeu → Bouton principal → ajoute ce jeu" :
-            @"To use Home here: System Settings → Game Controllers → Home Button → add this game";
-        else d[@"homeHelp"] = fr ?
-            @"Pour utiliser Home ici : Réglages Système → Manettes de jeu → Raccourcis de manette" :
-            @"To use Home here: System Settings → Game Controllers → Controller Shortcuts";
+        if (@available(macOS 27.0,*)) d[@"homeHelp"] = ov_home_help(fr,YES);
+        else d[@"homeHelp"] = ov_home_help(fr,NO);
     }
     char username[33]; int online;
     if (dm_net_nextendo_enabled() && dm_nextendo_login_display(username,&online)) {

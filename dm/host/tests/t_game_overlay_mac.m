@@ -50,6 +50,67 @@ static NSImage *backdrop(NSString *dir, BOOL blur) {
     return out;
 }
 
+static void capture(NSString *out, NSString *name, NSRect bounds, NSImage *picture, NSView *overlay, int preset) {
+    NSWindow *window = [[NSWindow alloc] initWithContentRect:bounds styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
+    NSView *stage = [[NSView alloc] initWithFrame:bounds];
+    window.contentView = stage;
+    if (picture) {
+        NSImageView *image = [NSImageView imageViewWithImage:picture]; image.frame = bounds;
+        image.imageScaling = NSImageScaleAxesIndependently;
+        [stage addSubview:image];
+    }
+    if (preset) {
+        NSTextField *fps = ov_fps_label(ov_fps_text(preset,60,16.7,@"▃▂▆▃▄▂▃▃"));
+        ov_fps_layout(fps,bounds,ov_hud_preset(preset,YES));
+        assert(NSContainsRect(bounds,fps.frame));
+        [stage addSubview:fps];
+    }
+    if (overlay) {
+        for (NSView *child in overlay.subviews) assert(NSContainsRect(bounds,child.frame));
+        [stage addSubview:overlay];
+    }
+    [stage layoutSubtreeIfNeeded]; [stage displayIfNeeded];
+    NSBitmapImageRep *rep = [stage bitmapImageRepForCachingDisplayInRect:bounds];
+    assert(rep.pixelsWide == 1600 && rep.pixelsHigh == 900);
+    [stage cacheDisplayInRect:bounds toBitmapImageRep:rep];
+    NSString *path = [out stringByAppendingPathComponent:[name stringByAppendingString:@".png"]];
+    assert([[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:path atomically:YES]);
+    printf("%s\n",path.UTF8String);
+}
+static void screens(NSString *out, NSString *assets, NSRect bounds, NSDictionary *sample) {
+    NSImage *picture = backdrop(assets,NO), *blurred = backdrop(assets,YES);
+    NSDictionary *theme = ov_theme(nil);
+    void (^unused)(NSInteger,NSInteger) = ^(NSInteger a,NSInteger i) { (void)a; (void)i; };
+    NSArray *quickNames = @[@"overlay-quick",@"overlay-quick-volume",@"overlay-quick-controllers",@"overlay-quick-multiplayer",
+        @"overlay-quick-quit",@"overlay-quick-hud-standard",@"overlay-quick-hud-full",@"overlay-quick-home-help"];
+    for (NSUInteger i=0; i<quickNames.count; i++) {
+        home_quit q = {0}; hq_open(&q,HQ_QUICK);
+        q.selection = i<=HQ_POWER ? (int)i : HQ_HUD;
+        if (i<7) q.card = q.selection;
+        q.confirm = i==HQ_POWER;
+        int preset = i==5 ? 2 : i==6 ? 3 : 1;
+        NSMutableDictionary *d = [sample mutableCopy];
+        ov_hud hud = ov_hud_preset(preset,YES);
+        d[@"preset"] = @(preset); d[@"size"] = ov_text(YES,hud.size ? @"Medium" : @"Small");
+        d[@"opacity"] = [NSString stringWithFormat:@"%d %%",ov_hud_opacity[hud.opacity]];
+        if (i==7) d[@"homeHelp"] = ov_home_help(YES,YES);
+        capture(out,quickNames[i],bounds,picture,ov_view(bounds,q,d,theme,unused),preset);
+    }
+    NSArray *fullNames = @[@"overlay-full",@"overlay-full-settings",@"overlay-full-profile",@"overlay-full-friends",@"overlay-full-achievements",
+        @"overlay-full-standalone"];
+    for (NSUInteger i=0; i<fullNames.count; i++) {
+        home_quit q = {0}; hq_open(&q,HQ_FULL); q.tab = i<OV_TAB_COUNT ? (int)i : OV_SESSION;
+        NSMutableDictionary *d = [sample mutableCopy]; d[@"background"] = blurred;
+        if (i==OV_TAB_COUNT) {
+            [d removeObjectsForKeys:@[@"cover",@"total",@"social"]];
+            d[@"actions"] = @[@"Reprendre",@"Quitter"];
+        }
+        capture(out,fullNames[i],bounds,nil,ov_view(bounds,q,d,theme,unused),0);
+    }
+    capture(out,@"hud-minimal",bounds,picture,nil,1);
+    capture(out,@"hud-standard",bounds,picture,nil,2);
+}
+
 int main(void) {
     @autoreleasepool {
         [NSApplication sharedApplication];
@@ -61,23 +122,23 @@ int main(void) {
         NSView *smallView = ov_view(smallBounds,small,@{@"actions":@[@"Resume",@"Quit"]},ov_theme(nil),^(NSInteger a,NSInteger i) { (void)a; (void)i; });
         for (NSView *child in smallView.subviews) if ([child isKindOfClass:NSButton.class]) {
             assert(NSContainsRect(smallBounds,child.frame));
-            assert(![child.accessibilityLabel isEqualToString:@"Profile"]);
+            assert((![@[@"Profile",@"Friends",@"Achievements",@"Return to Arcane"] containsObject:child.accessibilityLabel]));
         }
         const char *out = getenv("DM_OVERLAY_TEST_SCREENS"), *assets = getenv("DM_OVERLAY_TEST_ASSETS");
         NSRect bounds = NSMakeRect(0,0,1600,900);
+        NSMutableDictionary *d = [@{@"fr":@YES, @"title":@"Pokémon Legends: Z-A", @"session":@"42 min", @"total":@"10 h 47 min",
+            @"controllers":@"2 connectées", @"nextendo":@"Koya · en ligne", @"onlineAllowed":@YES, @"network":@"ZeroTier connecté", @"vpnUp":@YES,
+            @"controllerRows":@[@{@"player":@1,@"name":@"Nintendo Switch Pro Controller"},@{@"player":@2,@"name":@"DualSense Wireless Controller"}],
+            @"ldn":@"Salon LDN actif", @"ldnActive":@YES, @"volume":@"65 %",
+            @"clock":@"21:42", @"canQuit":@YES, @"actions":@[@"Reprendre",@"Retour à Arcane",@"Quitter"],
+            @"preset":@1, @"position":@"En haut à droite", @"size":@"Petit", @"opacity":@"50 %", @"scope":@"Pour ce jeu",
+            @"quitTitle":@"Quitter Pokémon Legends: Z-A ?",
+            @"social":@{@(OV_PROFILE):@"Koya\nCompte Nextendo · En ligne",
+                        @(OV_FRIENDS):@"Lina · En ligne\nMilo · Hors ligne",
+                        @(OV_ACHIEVEMENTS):@"3 succès obtenus\n\nPremiers pas · Explorateur d’Illumis · Premier partenaire"}} mutableCopy];
         for (int full=0; full<2; full++) {
             home_quit q = {0}; hq_open(&q,full ? HQ_FULL : HQ_QUICK);
             if (!full) q.card = HQ_HUD;
-            NSMutableDictionary *d = [@{@"fr":@YES, @"title":@"Pokémon Legends: Z-A", @"session":@"42 min", @"total":@"10 h 47 min",
-                @"controllers":@"2 connectées", @"nextendo":@"Koya · en ligne", @"onlineAllowed":@YES, @"network":@"ZeroTier connecté", @"vpnUp":@YES,
-                @"clock":@"21:42", @"canQuit":@YES, @"actions":@[@"Reprendre",@"Retour à Arcane",@"Quitter"],
-                @"preset":@1, @"position":@"En haut à droite", @"size":@"Petit", @"opacity":@"50 %", @"scope":@"Pour ce jeu",
-                @"quitTitle":@"Quitter ?"} mutableCopy];
-            if (out && assets) {
-                d[@"background"] = backdrop(@(assets),full);
-                d[@"cover"] = [[NSImage alloc] initWithContentsOfFile:[@(assets) stringByAppendingPathComponent:@"cover.png"]];
-                if (full) d[@"social"] = @{@(OV_PROFILE):@"Koya",@(OV_FRIENDS):@"1 ami",@(OV_ACHIEVEMENTS):@"3 succès"};
-            }
             __block NSInteger action = -1, index = -1;
             NSView *view = ov_view(bounds,q,d,ov_theme(nil),^(NSInteger a,NSInteger i) { action=a; index=i; });
             assert(view.isAccessibilityElement && view.subviews.count > 15);
@@ -90,21 +151,6 @@ int main(void) {
                 }
             }
             assert(chosen == 1 && action == (full ? OV_MAIN : OV_PRESET) && index == (full ? 0 : 1));
-            if (!full && out && assets) {
-                NSTextField *fps = ov_fps_label(@"60 FPS");
-                fps.frame = NSMakeRect(1494,33,53,23); fps.alphaValue=.5;
-                fps.font = [NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold]; fps.layer.cornerRadius=7;
-                [view addSubview:fps];
-            }
-            if (out && assets) {
-                NSWindow *window = [[NSWindow alloc] initWithContentRect:bounds styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
-                window.contentView = view; [view layoutSubtreeIfNeeded]; [view displayIfNeeded];
-                NSBitmapImageRep *rep = [view bitmapImageRepForCachingDisplayInRect:bounds];
-                [view cacheDisplayInRect:bounds toBitmapImageRep:rep];
-                NSString *path = [@(out) stringByAppendingPathComponent:full ? @"overlay-full.png" : @"overlay-quick.png"];
-                assert([[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:path atomically:YES]);
-                printf("%s\n",path.UTF8String);
-            }
             q.confirm = 1; q.row = 0;
             view = ov_view(bounds,q,d,ov_theme(nil),^(NSInteger a,NSInteger i) { action=a; index=i; });
             chosen = 0;
@@ -113,6 +159,11 @@ int main(void) {
                 [(NSButton *)child performClick:nil]; chosen++;
             }
             assert(chosen == 1 && action == OV_CONFIRM && index == 0);
+        }
+        if (out && assets) {
+            d[@"cover"] = [[NSImage alloc] initWithContentsOfFile:[@(assets) stringByAppendingPathComponent:@"cover.png"]];
+            assert(d[@"cover"]);
+            screens(@(out),@(assets),bounds,d);
         }
         puts("Overlay AppKit, accessible actions, theme, keyboard bindings and HUD persistence: OK");
     }

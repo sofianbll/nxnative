@@ -326,7 +326,7 @@ DM_OVERLAY_KEYS	player	Mac Quick access and full overlay keys, two distinct F1â€
 DM_OVERLAY_PLAY_TIME	switch	Optional preformatted lifetime play time for the full Mac overlay
 DM_OVERLAY_SOCIAL_V1	switch	Launch-only optional JSON with prelocalized plain-text `profile`, `friends` and `achievements` summaries; absent tabs are hidden
 DM_OVERLAY_TEST_ASSETS	test	`=<folder>` of stand-in images `bg.jpg` and `cover.png` read by the offline AppKit overlay PNG test
-DM_OVERLAY_TEST_SCREENS	test	`=<folder>` for `tests/t_game_overlay_mac.m` to write Quick access and full overlay PNGs (also set `DM_OVERLAY_TEST_ASSETS`)
+DM_OVERLAY_TEST_SCREENS	test	`=<folder>` for `tests/t_game_overlay_mac.m` to write 1600Ã—900 Quick access cards, full overlay tabs and standalone HUD PNGs (also set `DM_OVERLAY_TEST_ASSETS`)
 DM_OVERLAY_THEME_V1	switch	Launch-only JSON palette with `ink`, `surface`, `scrim`, `focus` and `onFocus` in `#RRGGBBAA`; invalid or low contrast values revert to Selene, never set in `env.txt`
 DM_PAD_IDENTICAL	switch	`0` stops reading identical pads here when GameController lists fewer of their model than IOKit has, such as two Pro Controllers over USB (each a player of its own: a Pro Controller from its report 0x30, another model from its HID elements; `pad_hid_mac.h`, `pad_pro.h`); `DM_HID_PADS=0` stops it too; Mac only
 DM_PAD_MERGE	switch	`=1` merges every controller into player 1, as before, instead of giving each controller a player of its own (Mac and iOS)
