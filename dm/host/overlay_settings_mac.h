@@ -62,8 +62,16 @@ static NSDictionary *ov_theme(NSString *raw) {
 typedef struct { int preset, position, size, opacity; BOOL local; } ov_hud;
 static const ov_hud ov_hud_default = {1, 1, 0, 2, YES};
 static const int ov_hud_opacity[] = {25, 35, 50, 75, 100};
-static ov_hud ov_hud_preset(int preset, BOOL local) {
-    return (ov_hud){preset, 1, preset > 1 ? 1 : 0, preset > 1 ? 3 : 2, local};
+// Presets: 0 Off, 1 FPS, 2 Standard (frame rate, frame time, GPU time), 3 Full (every metric Apple lists). Position: the corners. Size: Metal's scale of the drawable's width (300 px at least).
+// The numbers must be NSNumbers; MTL_HUD_* values in the dictionary replace only the keys given, so each call sends them all.
+static NSDictionary *ov_hud_properties(ov_hud hud) {
+    static const char *const elements[] = {"", "fps", "fps,frameinterval,gputime",
+        "device,rosetta,layersize,layerscale,memory,fps,frameinterval,gputime,thermal,frameintervalgraph,presentdelay,frameintervalhistogram,metalcpu,gputimeline,shaders,framenumber,disk,fpsgraph,toplabeledcommandbuffers,toplabeledencoders"};
+    static const char *const corners[] = {"topleft", "topright", "bottomleft", "bottomright"};
+    static const double scales[] = {.2, .3, .4};
+    if (!hud.preset) return @{@"mode":@"disabled"};
+    return @{@"mode":@"default", @"MTL_HUD_ELEMENTS":@(elements[hud.preset]), @"MTL_HUD_ALIGNMENT":@(corners[hud.position]),
+             @"MTL_HUD_SCALE":@(scales[hud.size]), @"MTL_HUD_OPACITY":@(ov_hud_opacity[hud.opacity] / 100.0)};
 }
 static ov_hud ov_hud_load(NSUserDefaults *store, NSString *game) {
     NSArray *values = [store arrayForKey:game]; BOOL local = values.count == 4;

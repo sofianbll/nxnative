@@ -17,7 +17,7 @@ static NSString *ov_text(BOOL fr, NSString *en) {
         @"Choose":@"Choisir", @"Back":@"Retour", @"Full overlay":@"Overlay complet",
         @"Game running":@"Jeu en cours", @"The game continues while the overlay is open.":@"Le jeu continue pendant que l’overlay est ouvert.",
         @"Play time":@"Temps de jeu", @"Controllers":@"Manettes", @"Game volume":@"Volume du jeu", @"Multiplayer":@"Jouer à plusieurs",
-        @"Performance HUD":@"HUD de performance", @"Off":@"Désactivé", @"Minimal FPS":@"FPS discret", @"Full":@"Complet",
+        @"Performance HUD":@"HUD de performance", @"Off":@"Désactivé", @"Full":@"Complet", @"At next launch":@"Au prochain lancement",
         @"Position":@"Position", @"Size":@"Taille", @"Opacity":@"Opacité", @"For this game":@"Pour ce jeu", @"For all games":@"Partout",
         @"Top left":@"En haut à gauche", @"Top right":@"En haut à droite", @"Bottom left":@"En bas à gauche", @"Bottom right":@"En bas à droite",
         @"Small":@"Petit", @"Medium":@"Moyen", @"Large":@"Grand", @"No controllers connected":@"Aucune manette connectée",
@@ -79,63 +79,6 @@ static NSTextField *ov_label(NSView *parent, NSRect frame, NSString *text, CGFlo
     label.frame = frame; label.font = [NSFont systemFontOfSize:size weight:weight]; label.textColor = ink;
     label.lineBreakMode = NSLineBreakByTruncatingTail; label.alignment = alignment; [parent addSubview:label]; return label;
 }
-@interface DmFrameGraph : NSView
-@property (copy) NSArray<NSNumber *> *samples;
-@end
-@implementation DmFrameGraph
-- (void)drawRect:(NSRect)dirty {
-    (void)dirty;
-    NSRect area=NSInsetRect(self.bounds,1,1);
-    [ov_color(0xffffff25) setStroke];
-    [NSBezierPath strokeLineFromPoint:NSMakePoint(NSMinX(area),NSMinY(area)) toPoint:NSMakePoint(NSMaxX(area),NSMinY(area))];
-    if (self.samples.count<2) return;
-    NSBezierPath *line=[NSBezierPath bezierPath]; line.lineWidth=1.25;
-    for (NSUInteger i=0;i<self.samples.count;i++) {
-        CGFloat f=fmax(0,fmin(1,self.samples[i].doubleValue/40));
-        NSPoint p=NSMakePoint(NSMinX(area)+NSWidth(area)*i/(self.samples.count-1),NSMinY(area)+NSHeight(area)*f);
-        if (i) [line lineToPoint:p]; else [line moveToPoint:p];
-    }
-    [ov_color(0x9ccbffff) setStroke]; [line stroke];
-}
-@end
-@interface DmFPSView : NSView
-@property (strong) NSTextField *rate, *interval;
-@property (strong) DmFrameGraph *graph;
-@end
-@implementation DmFPSView
-- (NSView *)hitTest:(NSPoint)p { (void)p; return nil; }
-@end
-static DmFPSView *ov_fps_view(void) {
-    DmFPSView *v=[DmFPSView new]; v.wantsLayer=YES; v.layer.masksToBounds=YES;
-    v.layer.backgroundColor=ov_color(0x14181fe0).CGColor;
-    v.rate=ov_label(v,NSZeroRect,@"— FPS",17,NSFontWeightSemibold,NSColor.whiteColor,NSTextAlignmentRight);
-    v.interval=ov_label(v,NSZeroRect,@"— ms",17,NSFontWeightRegular,ov_color(0xffffffd9),NSTextAlignmentRight);
-    v.graph=[DmFrameGraph new]; [v addSubview:v.graph];
-    return v;
-}
-static void ov_fps_sample(DmFPSView *v,double fps,double ms,NSArray<NSNumber *> *history, BOOL fr) {
-    v.rate.stringValue=fps>0 ? [NSString stringWithFormat:@"%.0f FPS",fps] : @"— FPS";
-    NSString *time=ms>0 ? [NSString stringWithFormat:@"%.1f ms",ms] : @"— ms";
-    v.interval.stringValue=fr ? [time stringByReplacingOccurrencesOfString:@"." withString:@","] : time;
-    v.graph.samples=history; [v.graph setNeedsDisplay:YES];
-}
-static void ov_fps_layout(DmFPSView *v, NSRect bounds, ov_hud hud) {
-    const CGFloat scales[]={1,1.22,1.48};
-    CGFloat k=fmax(.38,fmin(NSWidth(bounds)/1920,NSHeight(bounds)/1080))*scales[hud.size];
-    BOOL second=hud.preset>=2, graph=hud.preset>=3, right=(hud.position&1)!=0;
-    CGFloat pad=10*k, row=20*k, gap=3*k, plot=21*k, margin=40*k/scales[hud.size];
-    CGFloat w=(graph ? 128 : second ? 106 : 92)*k, h=2*pad+row+(second ? row+gap : 0)+(graph ? gap+plot : 0);
-    CGFloat x=right ? NSWidth(bounds)-margin*1.6-w : margin*1.6;
-    CGFloat y=hud.position&2 ? margin : NSHeight(bounds)-margin-h;
-    v.frame=NSMakeRect(x,y,w,h); v.layer.cornerRadius=10*k; v.alphaValue=ov_hud_opacity[hud.opacity]/100.0;
-    v.rate.frame=NSMakeRect(pad,h-pad-row,w-2*pad,row);
-    v.interval.frame=NSOffsetRect(v.rate.frame,0,-row-gap); v.interval.hidden=!second;
-    for (NSTextField *t in @[v.rate,v.interval]) {
-        t.font=[NSFont monospacedDigitSystemFontOfSize:17*k weight:t==v.rate ? NSFontWeightSemibold : NSFontWeightRegular];
-        t.alignment=right ? NSTextAlignmentRight : NSTextAlignmentLeft;
-    }
-    v.graph.frame=NSMakeRect(pad,pad,w-2*pad,plot); v.graph.hidden=!graph;
-}
 static NSButton *ov_button(DmOverlay *v, NSRect frame, NSString *text, NSString *symbol, CGFloat size, NSColor *ink,
                       NSColor *fill, NSColor *stroke, CGFloat radius, CGFloat line, NSInteger action, NSInteger index, BOOL focus) {
     NSButton *b = [NSButton buttonWithTitle:text target:v action:@selector(activate:)];
@@ -158,7 +101,7 @@ static NSArray *ov_items(BOOL fr) {
     return @[@"HUD", ov_text(fr, @"Game volume"), ov_text(fr, @"Controllers"), ov_text(fr, @"Multiplayer"), ov_text(fr, @"Quit")];
 }
 static NSArray *ov_presets(BOOL fr) {
-    return @[ov_text(fr, @"Off"), ov_text(fr, @"Minimal FPS"), @"Standard", ov_text(fr, @"Full")];
+    return @[ov_text(fr, @"Off"), @"FPS", @"Standard", ov_text(fr, @"Full")];
 }
 static NSArray<NSNumber *> *ov_tabs(NSDictionary *social) {
     NSMutableArray *tabs = [NSMutableArray arrayWithObject:@(OV_SESSION)];
@@ -460,7 +403,7 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
             @[d[@"ldn"] ?: T(@"LDN disabled"),d[@"network"] ?: T(@"VPN not configured")];
         if (!rows.count) rows = @[T(@"No controllers connected")];
         NSUInteger visible = MIN(rows.count, 8);
-        CGFloat w = q.card == HQ_HUD ? 608 : 520, h = q.card == HQ_HUD ? 330 : q.card == HQ_VOLUME ? 130 : 68+56*visible+(rows.count>visible ? 26 : 0);
+        CGFloat w = q.card == HQ_HUD ? 608 : 520, h = q.card == HQ_HUD ? 330+30*[d[@"hudLater"] boolValue] : q.card == HQ_VOLUME ? 130 : 68+56*visible+(rows.count>visible ? 26 : 0);
         CGFloat x = quick ? fmax(30,fmin(rail+96*q.selection-w/2,l.w-w-30)) : cx-478;
         CGFloat y = quick ? l.h-230-h : (l.h-1080)/2+320;
         NSView *cardView=ov_box(v,R(x,y,w,h),surface,[ink colorWithAlphaComponent:.16],18*k,k);
@@ -519,6 +462,7 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
                 L(x+(q.card==HQ_NETWORK ? 54 : 36),ry+9,w-92,29,rows[i],18,NSFontWeightRegular,ink);
             }
         }
+        if (q.card == HQ_HUD && [d[@"hudLater"] boolValue]) L(x+36,y+h-36,w-72,22,T(@"At next launch"),16,NSFontWeightSemibold,muted);
         if (q.card == HQ_PADS && rows.count > visible)
             L(x+36,y+h-30,w-72,22,([NSString stringWithFormat:@"+%lu",(unsigned long)(rows.count-visible)]),16,NSFontWeightSemibold,muted);
     }

@@ -533,10 +533,9 @@ static void jc1pad_detach(jc1_pad *d) {   // d is already off g_jc1_pads
     cp_poll();   // one player fewer
 }
 static void jc1_models_changed(void) { pads_changed(nil); }
-static NSTimer *g_hq_timer, *g_hud_timer;
+static NSTimer *g_hq_timer;
 static NSView *g_hq_hold, *g_hq_view;
 static NSVisualEffectView *g_hq_blur;
-static DmFPSView *g_hud_label;
 static CAShapeLayer *g_hq_ring;
 static BOOL g_ov_fr;
 static BOOL g_ov_home_seen, g_ov_home_system, g_ov_help_once, g_ov_help_visible;
@@ -547,8 +546,7 @@ static NSDictionary *g_ov_theme;
 static NSDictionary *g_ov_social;
 static NSUserDefaults *g_hud_store;
 static ov_hud g_hud;
-static _Atomic int g_hud_enabled;
-static _Atomic uint64_t g_hud_frames;
+static BOOL g_hud_live;   // Metal's HUD was enabled before the first device, so its properties change live
 static int g_ov_volume = 100;
 static unsigned g_hq_pulse_serial;
 static NSMutableIndexSet *g_ov_keys_down;
@@ -556,44 +554,11 @@ static unsigned short g_ov_keys[2];
 static char g_hq_text[HQ_TEXTS][256];
 static void bg_enter(void);
 static void hq_show(void);
-static void hud_layout(void);
 
-// An existing Metal presented handler calls this; no new handler or GPU work per frame.
-void front_frame_presented(void) {
-    if (atomic_load_explicit(&g_hud_enabled, memory_order_relaxed))
-        atomic_fetch_add_explicit(&g_hud_frames, 1, memory_order_relaxed);
-}
-static void hud_update(void) {
-    static double prior;
-    static NSMutableArray<NSNumber *> *history;
-    double now = CACurrentMediaTime(), period = now - prior;
-    if (period < .5) return;
-    uint64_t frames = atomic_exchange_explicit(&g_hud_frames, 0, memory_order_relaxed);
-    prior = now;
-    if (!g_hud.preset || period > 2 || period <= 0) frames = 0;
-    double fps = frames ? frames/period : 0, ms = fps ? 1000/fps : 0;
-    if (!history) history=[NSMutableArray array];
-    if (g_hud.preset == 3) {
-        if (!frames) [history removeAllObjects];
-        else { if (history.count==16) [history removeObjectAtIndex:0]; [history addObject:@(ms)]; }
-    } else [history removeAllObjects];
-    ov_fps_sample(g_hud_label,fps,ms,history,g_ov_fr);
-    hud_layout();
-}
-static void hud_layout(void) {
-    NSView *cv = g_win.contentView;
-    if (!g_hud_label) return;
-    g_hud_label.hidden = !g_hud.preset || g_hq.phase == HQ_FULL;
-    ov_fps_layout(g_hud_label,cv.bounds,g_hud);
-}
+// Metal's HUD reads MTL_HUD_ENABLED when the process makes its first device: a launch with the HUD off cannot turn it on live (the card says so)
+static BOOL hud_forced(void) { return getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD")); }
 static void hud_apply(void) {
-    int enabled = g_hud.preset != 0;
-    if (atomic_exchange_explicit(&g_hud_enabled, enabled, memory_order_relaxed) != enabled)
-        atomic_store_explicit(&g_hud_frames, 0, memory_order_relaxed);
-    if (g_hud.preset && !g_hud_timer)
-        g_hud_timer = [NSTimer scheduledTimerWithTimeInterval:.5 repeats:YES block:^(NSTimer *t) { (void)t; hud_update(); }];
-    else if (!g_hud.preset && g_hud_timer) { [g_hud_timer invalidate]; g_hud_timer = nil; }
-    hud_layout();
+    if (g_hud_live) g_layer.developerHUDProperties = ov_hud_properties(g_hud);
 }
 static NSString *ov_env(const char *name) {
     const char *text = getenv(name);
@@ -631,9 +596,7 @@ static void hq_start(void) {
     g_ov_game = [@"game-" stringByAppendingString:@(DM_GAME_ID)];
     g_hud_store = [[NSUserDefaults alloc] initWithSuiteName:@"org.nxnative.overlay"];
     g_hud = ov_hud_load(g_hud_store, g_ov_game);
-    g_hud_label = ov_fps_view();
-    [g_win.contentView addSubview:g_hud_label];
-    hud_apply();
+    if (!hud_forced()) hud_apply();   // DM_METAL_HUD=1 keeps Apple's own look until the card is used
     NSString *cover = ov_env("DM_OVERLAY_COVER");
     if ([cover isAbsolutePath]) {
         NSDictionary *file = [NSFileManager.defaultManager attributesOfItemAtPath:cover error:NULL];
@@ -756,7 +719,6 @@ static void hq_action(NSInteger action, NSInteger index);
 static void hq_hide(void) {
     [g_hq_view removeFromSuperview]; g_hq_view = nil;
     [g_hq_blur removeFromSuperview]; g_hq_blur = nil;
-    hud_layout();
 }
 static void hq_show(void) {
     if (!hq_visible(g_hq.phase)) return;
@@ -799,7 +761,7 @@ static void hq_show(void) {
         @"controllers":[NSString stringWithFormat:@"%lu %@",(unsigned long)pads.count,ov_text(fr,@"connected")],
         @"controllerRows":pads, @"actions":actions, @"canQuit":@(!g_hq.no_hold),
         @"resume":@(g_hq_text[HQ_TEXT_RESUME]), @"quitTitle":@(g_hq_text[HQ_TEXT_TITLE]), @"quitLabel":@(g_hq_text[HQ_TEXT_QUIT]),
-        @"quitNote":@(g_hq_text[HQ_TEXT_NOTE]), @"cancel":@(g_hq_text[HQ_TEXT_CANCEL]), @"preset":@(g_hud.preset),
+        @"quitNote":@(g_hq_text[HQ_TEXT_NOTE]), @"cancel":@(g_hq_text[HQ_TEXT_CANCEL]), @"preset":@(g_hud.preset), @"hudLater":@(g_hud.preset && !g_hud_live),
         @"position":ov_text(fr,pos[g_hud.position]), @"size":ov_text(fr,sizes[g_hud.size]),
         @"opacity":[NSString stringWithFormat:@"%d %%",ov_hud_opacity[g_hud.opacity]],
         @"scope":ov_text(fr,g_hud.local ? @"For this game" : @"For all games"),
@@ -823,7 +785,7 @@ static void hq_show(void) {
     BOOL first = !g_hq_view;
     [g_hq_view removeFromSuperview];
     g_hq_view = ov_view(cv.bounds,g_hq,d,g_ov_theme,^(NSInteger action, NSInteger index) { hq_action(action,index); });
-    [cv addSubview:g_hq_view]; hud_layout();
+    [cv addSubview:g_hq_view];
     if (first) {
         hq_fade(g_hq_view,1);
         NSAccessibilityPostNotification(g_hq_view, NSAccessibilityLayoutChangedNotification);
@@ -861,7 +823,7 @@ static void hq_adjust(int step) {
         g_ov_volume = hq_clamp(g_ov_volume + 5*step,100); dm_audio_game_volume(g_ov_volume);
     } else if (g_hq.card == HQ_HUD) {
         switch (g_hq.row) {
-        case 0: g_hud = ov_hud_preset(hq_clamp(g_hud.preset+step,3),g_hud.local); break;
+        case 0: g_hud.preset = hq_clamp(g_hud.preset+step,3); break;
         case 1: g_hud.position = hq_clamp(g_hud.position+step,3); break;
         case 2: g_hud.size = hq_clamp(g_hud.size+step,2); break;
         case 3: g_hud.opacity = hq_clamp(g_hud.opacity+step,4); break;
@@ -903,7 +865,7 @@ static void hq_action(NSInteger action, NSInteger index) {
     }
     case OV_PRESET:
         if (g_hq.card==HQ_HUD && index>=0 && index<4) {
-            g_hq.row=0; g_hud=ov_hud_preset((int)index,g_hud.local); ov_hud_save(g_hud_store,g_ov_game,g_hud); hud_apply();
+            g_hq.row=0; g_hud.preset=(int)index; ov_hud_save(g_hud_store,g_ov_game,g_hud); hud_apply();
         }
         break;
     }
@@ -1218,7 +1180,7 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
     NSSize px = [self convertSizeToBacking:self.bounds.size]; if (px.width < 1 || px.height < 1 || CGSizeEqualToSize(l.drawableSize, px)) return;
     l.drawableSize = px; LOG("front end: drawable %.0fx%.0f", px.width, px.height);
 }
-- (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; [self fitDrawable]; hq_show(); hud_layout(); }
+- (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; [self fitDrawable]; hq_show(); }
 - (void)viewDidChangeBackingProperties { [super viewDidChangeBackingProperties]; [self fitDrawable]; }
 @end
 
@@ -1248,7 +1210,14 @@ static void *guest_tramp(void *p) {
 }
 
 // Metal reads MTL_HUD_ENABLED when the process makes its first device, which can be before the window: set from DM_METAL_HUD before main (set in front_run, the HUD did not show)
-__attribute__((constructor)) static void hud_env(void) { front_hud_env(); }
+__attribute__((constructor)) static void hud_env(void) {
+    front_hud_env();
+    if (!hud_forced()) @autoreleasepool {   // the saved HUD choice (the overlay's card) turns it on unless it is Off
+        NSUserDefaults *store = [[NSUserDefaults alloc] initWithSuiteName:@"org.nxnative.overlay"];
+        if (ov_hud_load(store,[@"game-" stringByAppendingString:@(DM_GAME_ID)]).preset) { setenv("DM_METAL_HUD","1",1); front_hud_env(); unsetenv("DM_METAL_HUD"); }
+    }
+    g_hud_live = getenv("MTL_HUD_ENABLED") && atoi(getenv("MTL_HUD_ENABLED"));
+}
 
 // ---------- Cheats: the menu and the panel (hle_cheats.c holds every state; these only show it and call it) ----------
 
@@ -2126,9 +2095,8 @@ void front_run(void (*guest)(void)) {
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         g_layer.contentsScale = win.backingScaleFactor;
-        // Apple's HUD over the game (frame rate, frame and GPU time, memory): front_hud_env turns it on before the first device. The layer's developerHUDProperties
-        // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
-        if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
+        // Apple's HUD over the game: hud_env turns it on before the first device, hud_apply (the overlay's HUD card) sets its look through developerHUDProperties
+        if (hud_forced()) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
         NSView *picture = [[DmPictureView alloc] initWithFrame:v.bounds];
         picture.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
         picture.layer = g_layer; picture.wantsLayer = YES;

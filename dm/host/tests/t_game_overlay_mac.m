@@ -1,6 +1,7 @@
 #import "../game_overlay_mac.h"
 #import <CoreImage/CoreImage.h>
 #include <assert.h>
+#import "../front.h"
 
 static void settings(void) {
     NSDictionary *fallback = ov_theme(nil);
@@ -32,14 +33,19 @@ static void settings(void) {
     [store setObject:@[@3,@2,@1,@"bad"] forKey:@"game-a"];
     assert(ov_hud_load(store,@"game-a").preset == 1);
     [store removePersistentDomainForName:domain];
-    DmFPSView *fps=ov_fps_view();
-    ov_fps_sample(fps,240,4.2,@[@15,@17,@90],YES);
-    NSRect bounds=NSMakeRect(0,0,1600,900);
-    for (int p=1;p<=3;p++) for (int z=0;z<3;z++) for (int corner=0;corner<4;corner++) {
-        ov_fps_layout(fps,bounds,(ov_hud){p,corner,z,2,YES});
-        assert(NSContainsRect(bounds,fps.frame) && NSWidth(fps.rate.frame)>=fps.rate.intrinsicContentSize.width);
-        assert(fps.rate.alignment==((corner&1) ? NSTextAlignmentRight : NSTextAlignmentLeft));
-    }
+    // preset -> Metal's HUD properties (numbers as NSNumbers, every key sent each time, Off only disables)
+    NSDictionary *off = @{@"mode":@"disabled"};
+    assert([ov_hud_properties((ov_hud){0,1,0,2,YES}) isEqual:off]);
+    NSDictionary *fpsHud = @{@"mode":@"default", @"MTL_HUD_ELEMENTS":@"fps", @"MTL_HUD_ALIGNMENT":@"topright", @"MTL_HUD_SCALE":@.2, @"MTL_HUD_OPACITY":@.5};
+    assert([ov_hud_properties(ov_hud_default) isEqual:fpsHud]);
+    NSDictionary *std = ov_hud_properties((ov_hud){2,2,1,4,YES}), *all = ov_hud_properties((ov_hud){3,0,2,0,YES});
+    assert([std[@"MTL_HUD_ELEMENTS"] isEqual:@"fps,frameinterval,gputime"] && [std[@"MTL_HUD_ALIGNMENT"] isEqual:@"bottomleft"]);
+    assert([std[@"MTL_HUD_SCALE"] isEqual:@.3] && [std[@"MTL_HUD_OPACITY"] isEqual:@1.0]);
+    assert([[all[@"MTL_HUD_ELEMENTS"] componentsSeparatedByString:@","] count] == 20 && [all[@"MTL_HUD_ALIGNMENT"] isEqual:@"topleft"]);
+    assert([all[@"MTL_HUD_SCALE"] isEqual:@.4] && [all[@"MTL_HUD_OPACITY"] isEqual:@.25]);
+    // DM_METAL_HUD still enables Metal's HUD at launch; 0 leaves it to the saved choice
+    unsetenv("MTL_HUD_ENABLED"); setenv("DM_METAL_HUD","0",1); front_hud_env(); assert(!getenv("MTL_HUD_ENABLED"));
+    setenv("DM_METAL_HUD","1",1); front_hud_env(); assert(!strcmp(getenv("MTL_HUD_ENABLED"),"1"));
 }
 
 static NSImage *backdrop(NSString *dir, BOOL blur) {
@@ -58,7 +64,7 @@ static NSImage *backdrop(NSString *dir, BOOL blur) {
     return out;
 }
 
-static void capture(NSString *out, NSString *name, NSRect bounds, NSImage *picture, NSView *overlay, int preset) {
+static void capture(NSString *out, NSString *name, NSRect bounds, NSImage *picture, NSView *overlay) {
     NSWindow *window = [[NSWindow alloc] initWithContentRect:bounds styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
     NSView *stage = [[NSView alloc] initWithFrame:bounds];
     window.contentView = stage;
@@ -66,17 +72,6 @@ static void capture(NSString *out, NSString *name, NSRect bounds, NSImage *pictu
         NSImageView *image = [NSImageView imageViewWithImage:picture]; image.frame = bounds;
         image.imageScaling = NSImageScaleAxesIndependently;
         [stage addSubview:image];
-    }
-    if (preset) {
-        DmFPSView *fps = ov_fps_view();
-        ov_fps_sample(fps,60,16.7,@[@15,@16,@16.5,@24,@18,@16,@21,@16.7,@15,@16,@19,@16.7],YES);
-        ov_fps_layout(fps,bounds,ov_hud_preset(preset,YES));
-        assert(NSContainsRect(bounds,fps.frame));
-        assert(NSWidth(fps.rate.frame)>=fps.rate.intrinsicContentSize.width);
-        assert(fps.interval.hidden==(preset==1) && fps.graph.hidden!=(preset==3));
-        if (preset>=2) assert(NSMaxY(fps.interval.frame)<NSMinY(fps.rate.frame));
-        if (preset==3) assert(NSContainsRect(fps.bounds,fps.graph.frame) && NSMaxY(fps.graph.frame)<NSMinY(fps.interval.frame));
-        [stage addSubview:fps];
     }
     if (overlay) {
         for (NSView *child in overlay.subviews) assert(NSContainsRect(bounds,child.frame));
@@ -103,11 +98,9 @@ static void screens(NSString *out, NSString *assets, NSRect bounds, NSDictionary
         q.confirm = i==HQ_POWER;
         int preset = i==5 ? 2 : i==6 ? 3 : 1;
         NSMutableDictionary *d = [sample mutableCopy];
-        ov_hud hud = ov_hud_preset(preset,YES);
-        d[@"preset"] = @(preset); d[@"size"] = ov_text(YES,hud.size ? @"Medium" : @"Small");
-        d[@"opacity"] = [NSString stringWithFormat:@"%d %%",ov_hud_opacity[hud.opacity]];
+        d[@"preset"] = @(preset); d[@"size"] = ov_text(YES,@"Small"); d[@"opacity"] = @"50 %"; d[@"hudLater"] = @(i==5);
         if (i==7) d[@"homeHelp"] = ov_home_help(YES,YES);
-        capture(out,quickNames[i],bounds,picture,ov_view(bounds,q,d,theme,unused),preset);
+        capture(out,quickNames[i],bounds,picture,ov_view(bounds,q,d,theme,unused));
     }
     NSArray *fullNames = @[@"overlay-full",@"overlay-full-settings",@"overlay-full-profile",@"overlay-full-friends",@"overlay-full-achievements",
         @"overlay-full-standalone"];
@@ -118,11 +111,8 @@ static void screens(NSString *out, NSString *assets, NSRect bounds, NSDictionary
             [d removeObjectsForKeys:@[@"cover",@"total",@"social"]];
             d[@"actions"] = @[@"Reprendre",@"Quitter"];
         }
-        capture(out,fullNames[i],bounds,nil,ov_view(bounds,q,d,theme,unused),0);
+        capture(out,fullNames[i],bounds,nil,ov_view(bounds,q,d,theme,unused));
     }
-    capture(out,@"hud-minimal",bounds,picture,nil,1);
-    capture(out,@"hud-standard",bounds,picture,nil,2);
-    capture(out,@"hud-full",bounds,picture,nil,3);
     NSDictionary *empty=ov_social([@"{\"profile\":{},\"friends\":{\"items\":[]},\"achievements\":{}}" dataUsingEncoding:NSUTF8StringEncoding]);
     for (NSArray *item in @[@[@(OV_PROFILE),@"profile-empty"],@[@(OV_FRIENDS),@"friends-empty"],
         @[@(OV_FRIENDS),@"friends-private"],@[@(OV_ACHIEVEMENTS),@"achievements-empty"],@[@(OV_SETTINGS),@"settings-empty"]]) {
@@ -133,7 +123,7 @@ static void screens(NSString *out, NSString *assets, NSRect bounds, NSDictionary
         d[@"controllers"]=@"0 connectée"; d[@"ldn"]=@"LDN désactivé"; d[@"volume"]=@"100 %";
         if ([item[1] isEqual:@"friends-private"])
             d[@"social"]=ov_social([@"{\"friends\":{\"shared\":false}}" dataUsingEncoding:NSUTF8StringEncoding]);
-        capture(out,[@"overlay-full-" stringByAppendingString:item[1]],bounds,nil,ov_view(bounds,q,d,theme,unused),0);
+        capture(out,[@"overlay-full-" stringByAppendingString:item[1]],bounds,nil,ov_view(bounds,q,d,theme,unused));
     }
 }
 
@@ -180,7 +170,7 @@ int main(void) {
             for (NSView *child in view.subviews) if ([child isKindOfClass:NSButton.class]) {
                 NSButton *button = (NSButton *)child;
                 assert(button.accessibilityLabel.length && NSContainsRect(bounds,child.frame));
-                if ([button.accessibilityLabel isEqualToString:full ? @"Reprendre" : @"FPS discret"] && button.accessibilitySelected) {
+                if ([button.accessibilityLabel isEqualToString:full ? @"Reprendre" : @"FPS"] && button.accessibilitySelected) {
                     [button performClick:nil]; chosen++;
                 }
             }
