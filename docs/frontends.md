@@ -100,6 +100,8 @@ Set `DM_OVERLAY_DATA` in the launch environment to the absolute path of a UTF-8 
 
 `profile` and each friend can optionally have an `avatar` (base64 PNG or JPEG, no data-URL prefix, at most 128 KiB encoded) and `color` (`#RRGGBB`); without an image the host draws initials. Text fields are single-line and at most 160 characters; `week` and `DM_OVERLAY_PLAY_TIME` are preformatted durations. Status values are `playing`, `online` and `offline`; missing/unknown means presence not shared. `friends.shared:false` suppresses the list and counts; up to 100 entries are read, online first. Send `recent` titles newest first; the host shows up to four. **View in Arcane** uses the same handoff as **Return to Arcane**, only when authorized by `DM_HOME_MENU_LAUNCHER=1`. No credentials, URLs or private tokens belong in the file.
 
+The host scales each avatar proportionally to fill its circle and crops from the center. Front ends do not need to add a circular mask or padding.
+
 #### Free the Home button for the overlay
 
 Connect the controller. On macOS 27, open **System Settings → Game Controllers → Home Button → Home Button Overrides → Edit…** (**Réglages Système → Manettes de jeu → Bouton principal → Substitutions du bouton principal → Modifier…**) and add the game's `.app`, not its launcher. To turn the system action off everywhere, disable **Enable Home Button Actions**. On macOS 26, look under **Game Controllers → Controller Shortcuts** (**Manettes de jeu → Raccourcis de manette**) and disable controller shortcuts if the option is present. Use Menu or F9/F10 if Home is not delivered. Apple's Game Overlay and its Games app are separate; the available behaviour depends on the OS, controller and settings.

@@ -89,7 +89,7 @@ static NSImage *backdrop(NSString *dir, BOOL blur) {
     return out;
 }
 
-static void capture(NSString *out, NSString *name, NSRect bounds, NSImage *picture, NSView *overlay) {
+static NSBitmapImageRep *capture(NSString *out, NSString *name, NSRect bounds, NSImage *picture, NSView *overlay) {
     NSWindow *window = [[NSWindow alloc] initWithContentRect:bounds styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
     NSView *stage = [[NSView alloc] initWithFrame:bounds];
     window.contentView = stage;
@@ -107,9 +107,44 @@ static void capture(NSString *out, NSString *name, NSRect bounds, NSImage *pictu
         bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
     assert(rep.pixelsWide == 1600 && rep.pixelsHigh == 900);
     [stage cacheDisplayInRect:bounds toBitmapImageRep:rep];
-    NSString *path = [out stringByAppendingPathComponent:[name stringByAppendingString:@".png"]];
-    assert([[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:path atomically:YES]);
-    printf("%s\n",path.UTF8String);
+    if (out) {
+        NSString *path = [out stringByAppendingPathComponent:[name stringByAppendingString:@".png"]];
+        assert([[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:path atomically:YES]);
+        printf("%s\n",path.UTF8String);
+    }
+    return rep;
+}
+
+static BOOL white_at(NSBitmapImageRep *rep, NSInteger x, NSInteger y) {
+    NSColor *pixel = [[rep colorAtX:x y:y] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+    return pixel.redComponent > .9 && pixel.greenComponent > .9 && pixel.blueComponent > .9 && pixel.alphaComponent > .9;
+}
+
+static void avatars(NSString *out, NSRect bounds, NSDictionary *sample) {
+    NSMutableDictionary *d = [sample mutableCopy];
+    home_quit q = {0}; hq_open(&q,HQ_FULL); q.tab=OV_PROFILE;
+    BOOL fills=YES;
+    for (int wide=0; wide<2; wide++) {
+        // The small square must grow; the wide image must show only its white center.
+        NSImage *fixture = [NSImage imageWithSize:NSMakeSize(wide ? 360 : 36,wide ? 120 : 36) flipped:NO
+            drawingHandler:^BOOL(NSRect rect) {
+                [NSColor.redColor setFill]; NSRectFill(rect);
+                [NSColor.whiteColor setFill]; NSRectFill(NSInsetRect(rect,wide ? 120 : 0,0));
+                return YES;
+            }];
+        NSBitmapImageRep *bitmap = [NSBitmapImageRep imageRepWithData:fixture.TIFFRepresentation];
+        NSString *avatar = [[bitmap representationUsingType:NSBitmapImageFileTypeJPEG properties:@{}] base64EncodedStringWithOptions:0];
+        assert(avatar.length && avatar.length<=131072);
+        d[@"social"] = ov_social([NSJSONSerialization dataWithJSONObject:@{
+            @"profile":@{@"name":@"Test profile",@"avatar":avatar}
+        } options:0 error:NULL]);
+        NSView *overlay = ov_view(bounds,q,d,ov_theme(nil),^(NSInteger a,NSInteger i) {});
+        NSBitmapImageRep *rep = capture(out,wide ? @"avatar-wide" : @"avatar-square",bounds,nil,overlay);
+        // The frame spans x=93…376, y=267…550 in the 1600×900 capture.
+        fills &= white_at(rep,235,408) && white_at(rep,235,275) && white_at(rep,101,408)
+            && !white_at(rep,101,275) && !white_at(rep,95,408);
+    }
+    assert(fills && "personal portraits must fill a centered circular frame");
 }
 static void screens(NSString *out, NSString *assets, NSRect bounds, NSDictionary *sample) {
     NSImage *picture = backdrop(assets,NO), *blurred = backdrop(assets,YES);
@@ -247,6 +282,7 @@ int main(void) {
         for (NSView *child in profile.subviews)
             if ([child.accessibilityLabel isEqual:@"Voir dans Arcane"]) [(NSButton *)child performClick:nil];
         assert(used==OV_MAIN && row==0);
+        avatars(out ? @(out) : nil,bounds,d);
         if (out && assets) {
             d[@"cover"] = [[NSImage alloc] initWithContentsOfFile:[@(assets) stringByAppendingPathComponent:@"cover.png"]];
             assert(d[@"cover"]);

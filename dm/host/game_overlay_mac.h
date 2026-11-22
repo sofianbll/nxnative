@@ -220,29 +220,33 @@ static void ov_avatar(NSView *v, NSRect frame, NSDictionary *person, NSColor *su
         sscanf(color.UTF8String,"#%6x%c",&rgba,&tail)==1 ? ov_color((rgba<<8)|255) : [ink colorWithAlphaComponent:.38];
     CGFloat size=NSWidth(frame);
     NSView *circle=ov_box(v,frame,surface,ring,size/2,MAX(k,size*.018)); circle.layer.masksToBounds=YES;
-    NSImage *image=nil;
     if ([encoded isKindOfClass:NSString.class] && encoded.length<=131072) {
         NSData *bytes=[[NSData alloc] initWithBase64EncodedString:encoded options:0];
         CGImageSourceRef source=bytes ? CGImageSourceCreateWithData((__bridge CFDataRef)bytes,NULL) : NULL;
         if (source) {
             CGImageRef cg=CGImageSourceCreateThumbnailAtIndex(source,0,(__bridge CFDictionaryRef)@{
                 (id)kCGImageSourceCreateThumbnailFromImageAlways:@YES,(id)kCGImageSourceThumbnailMaxPixelSize:@384 });
-            if (cg) { image=[[NSImage alloc] initWithCGImage:cg size:NSZeroSize]; CGImageRelease(cg); }
             CFRelease(source);
+            if (cg) {
+                CALayer *portrait=[CALayer layer];
+                CGFloat border=circle.layer.borderWidth;
+                portrait.frame=CGRectInset(circle.bounds,border,border);
+                portrait.cornerRadius=CGRectGetWidth(portrait.bounds)/2;
+                portrait.masksToBounds=YES;
+                portrait.contentsGravity=kCAGravityResizeAspectFill;
+                portrait.contents=(__bridge id)cg;
+                [circle.layer addSublayer:portrait];
+                CGImageRelease(cg);
+                return;
+            }
         }
     }
-    if (image) {
-        NSImageView *iv=[NSImageView imageViewWithImage:image];
-        iv.frame=NSInsetRect(circle.bounds,size*.035,size*.035); iv.wantsLayer=YES; iv.layer.cornerRadius=NSWidth(iv.frame)/2;
-        iv.layer.masksToBounds=YES; [circle addSubview:iv];
-    } else {
-        NSMutableString *initials=[NSMutableString string];
-        for (NSString *part in [name componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceCharacterSet]) {
-            if (part.length) [initials appendString:[part substringWithRange:[part rangeOfComposedCharacterSequenceAtIndex:0]].uppercaseString];
-            if (initials.length>=2) break;
-        }
-        ov_label(circle,NSMakeRect(0,size*.30,size,size*.44),initials.length ? initials : @"—",size*.29,NSFontWeightLight,ink,NSTextAlignmentCenter);
+    NSMutableString *initials=[NSMutableString string];
+    for (NSString *part in [name componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceCharacterSet]) {
+        if (part.length) [initials appendString:[part substringWithRange:[part rangeOfComposedCharacterSequenceAtIndex:0]].uppercaseString];
+        if (initials.length>=2) break;
     }
+    ov_label(circle,NSMakeRect(0,size*.30,size,size*.44),initials.length ? initials : @"—",size*.29,NSFontWeightLight,ink,NSTextAlignmentCenter);
 }
 
 static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary *theme, void (^choose)(NSInteger, NSInteger)) {
