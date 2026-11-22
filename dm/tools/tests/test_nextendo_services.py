@@ -15,6 +15,7 @@ assert spec is not None and spec.loader is not None
 n = importlib.util.module_from_spec(spec); spec.loader.exec_module(n)
 WONDER = '010015100b514000'
 ZA = '0100f43008c44000'
+VP = 'v3-lp1.vp.n.srv.nintendo.net'
 
 
 class NextendoServicesTests(unittest.TestCase):
@@ -24,21 +25,27 @@ class NextendoServicesTests(unittest.TestCase):
         authority = value['serviceCAs']['legends-za']
         digest = authority['caSHA256'] = hashlib.sha256(dedicated).hexdigest()
         filename = digest + '.der'
+        g3 = b'synthetic NPLN G3 CA'; npln = value['serviceCAs']['npln-class2-g3']
+        g3_digest = npln['caSHA256'] = hashlib.sha256(g3).hexdigest()
         mk8 = '0100152000022000'
         base = dict(value, titles={k: v for k, v in value['titles'].items() if k != ZA})
         self.assertEqual(n.rules(value, mk8), n.rules(base, mk8))
-        pem = b'-----BEGIN CERTIFICATE-----\n' + base64.b64encode(dedicated) + b'\n-----END CERTIFICATE-----'
+        def pem(data):
+            return b'-----BEGIN CERTIFICATE-----\n' + base64.b64encode(data) + b'\n-----END CERTIFICATE-----'
         with tempfile.TemporaryDirectory() as folder, patch.object(n.Path, 'home', return_value=Path(folder)), patch.object(n, 'contract', return_value=value):
             root = Path(folder)
-            with patch.object(n.urllib.request, 'urlopen', return_value=io.BytesIO(pem)) as fetch:
+            data_by_url = {authority['caURL']: dedicated, npln['caURL']: g3}
+            with patch.object(n.urllib.request, 'urlopen', side_effect=lambda request, **_: io.BytesIO(pem(data_by_url[request.full_url]))) as fetch:
                 other = n.prepare(REPO, mk8, root / 'mk8', ca=ca)
                 self.assertFalse((other / filename).exists())
+                self.assertFalse((other / (g3_digest + '.der')).exists())
                 out = n.prepare(REPO, ZA, root / 'za', ca=ca)
-                self.assertEqual(fetch.call_count, 1)
-                self.assertEqual(fetch.call_args.args[0].full_url, authority['caURL'])
+                self.assertCountEqual([call.args[0].full_url for call in fetch.call_args_list], list(data_by_url))
             rows = [r.split('\t') for r in (out / 'routes.tsv').read_text().splitlines()[1:]]
             self.assertEqual([r for r in rows if r[4] == filename], [[
                 'exact', 't-4e44e7a0-lp1.lp1.t.npln.srv.nintendo.net', value['provider']['server'], '@host', filename, digest, ZA + ':2']])
+            self.assertEqual([r for r in rows if r[4] == g3_digest + '.der'], [[
+                'exact', VP, value['provider']['server'], '@host', g3_digest + '.der', g3_digest]])
             self.assertEqual(next(r[4] for r in rows if r[1] == 'nintendo.net'), 'provider-ca.der')
             manifest = json.loads((out / 'manifest.json').read_text())
             self.assertEqual(manifest['files'][filename], digest)
@@ -50,7 +57,7 @@ class NextendoServicesTests(unittest.TestCase):
             with patch.object(n.urllib.request, 'urlopen', side_effect=AssertionError('unexpected download')):
                 n.prepare(REPO, ZA, root / 'cached', ca=ca)
             authority['caSHA256'] = '0' * 64
-            with patch.object(n.urllib.request, 'urlopen', return_value=io.BytesIO(pem)), self.assertRaisesRegex(ValueError, 'integrity'):
+            with patch.object(n.urllib.request, 'urlopen', return_value=io.BytesIO(pem(dedicated))), self.assertRaisesRegex(ValueError, 'integrity'):
                 n.prepare(REPO, ZA, root / 'bad', ca=ca)
             self.assertFalse((root / 'bad').exists())
 

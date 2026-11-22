@@ -56,6 +56,25 @@ def main():
             result=subprocess.run([binary,host,str(root/anchor),str(root/certificate)],capture_output=True)
             if result.returncode != (0 if accepted else 1): raise AssertionError((host,anchor,certificate,result.returncode,result.stderr))
         print('Strict private X.509:',len(cases),'cases passed; 10-year private leaf accepted, SAN/time/purpose/trust/DER failures rejected.')
+
+        # This chain is valid apart from the CA's missing keyUsage, but has
+        # neither the exact enrolled key nor the DER digest of Nextendo's root.
+        vp = 'v3-lp1.vp.n.srv.nintendo.net'
+        (root/'g3.cnf').write_text((root/'ca.cnf').read_text()
+            .replace('Original ephemeral NX test authority', 'Nintendo Class 2 CA - G3\nO=Nintendo')
+            .replace('keyUsage=critical,keyCertSign,cRLSign\n', ''))
+        command('req','-x509','-newkey','rsa:2048','-nodes','-keyout','g3.key','-out','g3.pem','-days','1','-config','g3.cnf')
+        command('x509','-in','g3.pem','-outform','der','-out','g3.der')
+        (root/'vp.cnf').write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n'
+            'extendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\nsubjectAltName=DNS:'+vp+'\n')
+        command('x509','-req','-in','leaf.csr','-CA','g3.pem','-CAkey','g3.key','-set_serial','1',
+                '-out','vp.pem','-days','1','-extfile','vp.cnf')
+        command('verify','-purpose','sslserver','-verify_hostname',vp,'-CAfile','g3.pem','vp.pem')
+        command('x509','-in','vp.pem','-outform','der','-out','vp.der')
+        result=subprocess.run([binary,vp,str(root/'g3.der'),str(root/'vp.der')],capture_output=True)
+        if result.returncode != 1: raise AssertionError(('same subject, different anchor',result.returncode,result.stderr))
+        print('VP X.509: a same-subject CA with a different fingerprint and missing keyUsage is rejected.')
+
         def pin(name, key='leaf.key', extra=(), extensions=None):
             csr = 'leaf.csr'
             if key != 'leaf.key':

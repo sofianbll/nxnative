@@ -9,6 +9,7 @@
 #include <openssl/x509_vfy.h>
 #include <openssl/x509v3.h>
 #include <openssl/err.h>
+#include <openssl/sha.h>
 
 static bool valid_host(const char *host) {
     if (!host) return false;
@@ -31,6 +32,20 @@ static X509 *certificate(const uint8_t *bytes, size_t size) {
     if (value && cursor != bytes + size) { X509_free(value); value = NULL; }
     return value;
 }
+
+static int vp_verify(int ok, X509_STORE_CTX *context) {
+    STACK_OF(X509) *chain = X509_STORE_CTX_get0_chain(context);
+    // Nextendo's enrolled VP root omits keyUsage. Ignore only that error on
+    // that exact anchor, not on another certificate bearing the same name.
+    if (!ok && X509_STORE_CTX_get_error(context) == X509_V_ERR_CA_CERT_MISSING_KEY_USAGE &&
+        X509_STORE_CTX_get_error_depth(context) == sk_X509_num(chain) - 1 &&
+        X509_STORE_CTX_get_current_cert(context) == X509_STORE_CTX_get_app_data(context)) {
+        X509_STORE_CTX_set_error(context, X509_V_OK);
+        return 1;
+    }
+    return ok;
+}
+
 bool dm_nextendo_x509_available(void) { return true; }
 bool dm_nextendo_x509_verify_pin(const char *host, const uint8_t *pin, size_t pin_size,
                                 const uint8_t *bytes, size_t size) {
@@ -81,8 +96,15 @@ bool dm_nextendo_x509_verify(const char *host, const uint8_t *anchor, size_t anc
     X509_VERIFY_PARAM_set_hostflags(parameters, X509_CHECK_FLAG_NEVER_CHECK_SUBJECT | X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
     X509_VERIFY_PARAM_set_auth_level(parameters, 2);
     X509_VERIFY_PARAM_set_depth(parameters, 12);
-    // No default paths, partial-chain trust, time suppression, custom verify
-    // callback or automatically adopted certificate supplied by the peer.
+    static const unsigned char vp_root[SHA256_DIGEST_LENGTH] = {
+        0xd7, 0x6b, 0xf8, 0xd0, 0xd7, 0xa1, 0xcd, 0x81, 0x87, 0x4b, 0x20, 0x31, 0x41, 0x71, 0xde, 0x9e,
+        0xcb, 0x64, 0x86, 0x48, 0x37, 0xd6, 0x84, 0xab, 0x68, 0x98, 0x31, 0xa7, 0x2b, 0x6c, 0x0a, 0x01
+    };
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    if (!strcmp(host, "v3-lp1.vp.n.srv.nintendo.net") && SHA256(anchor, anchor_size, digest) &&
+        !memcmp(digest, vp_root, sizeof vp_root) && X509_STORE_CTX_set_app_data(context, root) == 1)
+        X509_STORE_CTX_set_verify_cb(context, vp_verify);
+    // No default paths, partial-chain trust, time suppression or automatically adopted peer root.
     ok = X509_verify_cert(context) == 1;
 done:
     X509_STORE_CTX_free(context); X509_STORE_free(store); X509_free(root);
