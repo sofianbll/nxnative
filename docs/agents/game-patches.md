@@ -43,6 +43,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `engine` | Unity's constant-buffer table locked on the shared device | race | blocked: the stubs have no function-matched form yet, and no other Unity 2018.4 main on the drive shares these functions (Ori and the Blind Forest 1.0.2: no fingerprint match) | checked: probes of both threads inserting the same key and of the table API's callers by thread; Blind Forest main compared with nso_fnmap | 1 | [Ori and the Will of the Wisps](../../dm/games/01008DD013200000/README.md) | Unity 2018.4's threaded GfxDevice: the main thread registers layouts on the real device while the render thread uses the same table; any Unity 2018.4 build with this code has the race |
 | `build` → `game` | 60 fps frame step on 1.3.0 (the same stub at its known addresses) | frame rate | blocked: 1.3.0's main is on neither drive to fingerprint (v458752 is the update on them) | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the stub above, placed at 1.3.0's addresses: the matched rule would serve it once its functions are fingerprinted |
 | `build` → `game` | adaptive 30/60 fps native clock interval | frame rate | blocked: frame-step stubs have no function-matched form yet | judgement | 1 | [Pokémon Legends: Z-A](../../dm/games/0100F43008C44000/README.md) | Trinity's clock and graphics interval selector |
+| `build` → `game` | cutscene fade scheduling uses the sequence frame rate | frame rate | blocked: the scheduler has no unwind entry in 1.1.1, which the function matcher needs | checked: 1.1.1 disassembly and post-Porquillon runtime trace of the fade trigger, sequence rate and opacity | 1 | [Pikmin 4](../../dm/games/0100B7C00933A000/README.md) | the title's fade scheduler compares sequence-frame positions after converting seconds with the engine frame rate |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
 | `game` → `engine` | Snowdrop three-pool allocator: 12 GB of ranges → 4 GB | address space | blocked: only this game has been checked with the older initializer and this allocation split | checked: unique function and original bytes on 1.0 and 1.05; pool use measured on the Mac, 2026-10-31 | 1 | [South Park: The Fractured But Whole](../../dm/games/01008F2005154000/README.md) | the older initializer holds the pool bounds in separate immediates; its complete function moves between game builds. The 4 GB size works around the iPhone's address-space limit |
 | `build` → `game` | 60 fps intervals and dynamic-resolution constants | frame rate | kept: 1.0.3 (v131072) is the newest update of both releases and likely their last: a function match would serve no other build; the rewriter would also need matched rules that write fixups and declare capabilities, a new mechanism (2026-11-09) | checked: both releases' mains, where the host's rows for them were found; the global main's sites mapped into ASTRAL CHAIN and Bayonetta 1-3 (2026-11-09) | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own constants; the Asian release's function is the global one's 0x13c0 further on, so one function-matched rule could serve both releases. No PlatinumGames sibling shares the code: none of its sites has an exact match in ASTRAL CHAIN or Bayonetta 1-3 (nso_fnmap, 2026-11-09) |
@@ -80,6 +81,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Ori and the Will of the Wisps](#ori-and-the-will-of-the-wisps) | 0 | 0 | 10 | 0 | 0 | `build` → `engine` |
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Persona 5 Strikers](#persona-5-strikers) | 0 | 0 | 0 | 1 | 0 | `game` |
+| [Pikmin 4](#pikmin-4) | 0 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Pokémon Legends: Z-A](#pokémon-legends-z-a) | 0 | 0 | 1 | 0 | 1 | `build` → `game` ×2 |
 | [South Park: The Fractured But Whole](#south-park-the-fractured-but-whole) | 0 | 0 | 0 | 1 | 0 | `game` → `engine` |
@@ -90,7 +92,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [The Legend of Zelda: Breath of the Wild](#the-legend-of-zelda-breath-of-the-wild) | 7 | 0 | 43 | 0 | 0 | `build` → `game` ×2 |
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 2 | 3 | 0 | `game` ×5 |
+| [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 21 | 3 | 0 | `game` ×6 |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `game` |
 | [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Xenoblade Chronicles X: Definitive Edition](#xenoblade-chronicles-x-definitive-edition) | 6 | 0 | 1 | 1 | 0 | `game` ×2 |
@@ -103,7 +105,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **`build` → `game`**, rendering, blocked: the stubs have no function-matched form yet, judgement: screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT). The output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code
 
-- **3.0.3 `main`** `ff1d1c05…` ([patches.py:228](../../dm/games/01006F8002326000/patches.py#L228))
+- **3.0.3 `main`** `ff1d1c05…` ([patches.py:229](../../dm/games/01006F8002326000/patches.py#L229))
   <details><summary>14 frame-step sites</summary>
 
   - frame step `+0x265140`: nn::ui2d::DrawInfo::SetProjectionMtx: the y row divided by the vertical stretch, layouts in their own shape (bit 6)
@@ -123,6 +125,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
   </details>
 
+  - launcher capabilities: SCREEN_ASPECT
 
 ### ASTRAL CHAIN
 
@@ -486,6 +489,15 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **function-matched** (`main` of builds without CUTS): 60 Hz gameplay timing and presentation: 7 functions, 24 cuts
 
+### Pikmin 4
+
+[Pikmin 4](../../dm/games/0100B7C00933A000/README.md), `0100B7C00933A000`, [patches.py](../../dm/games/0100B7C00933A000/patches.py).
+
+- **`build` → `game`**, frame rate, blocked: the scheduler has no unwind entry in 1.1.1, which the function matcher needs, checked: 1.1.1 disassembly and post-Porquillon runtime trace of the fade trigger, sequence rate and opacity: cutscene fade scheduling uses the sequence frame rate. The title's fade scheduler compares sequence-frame positions after converting seconds with the engine frame rate
+
+- **1.1.1 `main`** `060f827b…` ([patches.py:30](../../dm/games/0100B7C00933A000/patches.py#L30))
+  - stub `+0x1ca4590`: cutscene fade scheduling uses the sequence frame rate
+
 ### Pokémon Legends: Arceus
 
 [Pokémon Legends: Arceus](../../dm/games/01001F5010DFA000/README.md), `01001F5010DFA000`, [patches.py](../../dm/games/01001F5010DFA000/patches.py).
@@ -504,7 +516,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **2.0.2 `main`** `b1f12fd9…` ([patches.py:53](../../dm/games/0100F43008C44000/patches.py#L53))
   - frame step `+0x1b296d8`: native clock interval from the host frame step; target 0 preserves the original selector
   - render scale up to 2× (the launcher offers DM_RENDER_SCALE)
-  - host [nvn_mtl.m:3352](../../dm/gfx/nvn/nvn_mtl.m#L3352): build check
+  - host [nvn_mtl.m:3448](../../dm/gfx/nvn/nvn_mtl.m#L3448): build check
 
 ### South Park: The Fractured But Whole
 
@@ -636,6 +648,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   </details>
 
   - render scale up to 1× (the launcher offers DM_RENDER_SCALE)
+  - launcher capabilities: SCREEN_ASPECT
 
 ### The Legend of Zelda: Link's Awakening
 
@@ -655,11 +668,12 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`game`**, frame rate, at goal, checked: v131072 main: one function with each fingerprint, each with one caller, the event update that reads the frame (vtable +0x78), the timeline and sound syncs and the player's +0xc read by disassembly; the opening timed with frames forced to two vsyncs (2026-11-16): movie frame: the pictures the player has taken. The game's own movie draw functions, found by their functions' fingerprints on any build that keeps them; it is the counter the same game's player keeps, so it goes with the player's two-picture cut and has no wider binding
 - **`game`**, frame rate, at goal, checked: v131072 main: one function with this fingerprint, the site and its free registers read by disassembly (2026-11-08): frame ratio from the host's step. The game's own frame-ratio division, found by its function's fingerprint on any build that keeps the function
 - **`game`**, rendering, at goal, checked: v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09): dynamic resolution: full size, or a climb on the load measured at each level. The game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION)
+- **`game`**, rendering, at goal, checked: v131072 main: one function per fingerprint, free registers read at each site; indexed pane names, classes and dimensions checked against the UIL records. PR #3037 measured Vert+ framing and the movie aspect on Mac; final iPad title retest pending: screen shape: taller render targets, cameras, Layout2 panes and a 16:9 movie viewport (DM_SCREEN_ASPECT). The game's own display setup, camera, pane and movie code; installed together after every function matches. Indexed pane edits verify the authored name, class and dimensions they use
 
 - **function-matched** (`main` of builds without CUTS): movie pictures a frame: up to 2, the constructor's value for an argument of 2 or more, whatever its caller passes (1): 1 function, 1 cut
 - **function-matched** (`main` of builds without CUTS): movie update cap: 3 pictures a frame, the frame step's largest hold, in place of the limit (2), which also sizes the decoder pipeline: 1 function, 1 cut
 - **function-matched** (`main` of builds without CUTS): movie frame: the pictures the player has taken (its +0xc), not 1 more for each frame drawn: 2 functions, 2 cuts
-- **function-matched frame step** (`main` of builds without FRAME_STEP): frame ratio from the host's step: a function of 0x9b4 bytes, `+0xe4` in it; dynamic resolution, a function of 0x294 bytes, `+0x0` in it; dynamic resolution update, a function of 0xb24 bytes,  in it; launcher capabilities: DYNAMIC_RESOLUTION
+- **function-matched frame step** (`main` of builds without FRAME_STEP): frame ratio from the host's step: a function of 0x9b4 bytes, `+0xe4` in it; dynamic resolution, a function of 0x294 bytes, `+0x0` in it; dynamic resolution update, a function of 0xb24 bytes,  in it; graphics init, a function of 0x570 bytes, `+0x204`, `+0x3c0` in it; scene app init, a function of 0x273c bytes, `+0x168`, `+0x174` in it; base scene defaults, a function of 0x3cc bytes, `+0x38c`, `+0x39c` in it; display mgr defaults, a function of 0x4e0 bytes, `+0xc` in it; base res read, a function of 0x1a0 bytes, `+0x114` in it; display target a, a function of 0x58 bytes, `+0x44` in it; display target b, a function of 0x1a8 bytes, `+0x110` in it; display target c, a function of 0x188 bytes, `+0x130` in it; layout ortho, a function of 0x7b0 bytes, `+0x208` in it; layout view ortho, a function of 0x62c bytes, `+0x398` in it; perspective proj, a function of 0xb8 bytes, `+0x0` in it; camera update, a function of 0x1648 bytes, `+0xf6c` in it; device proj, a function of 0x3b0 bytes, `+0x98` in it; layout calc matrix, a function of 0x208 bytes, `+0x19c` in it; pane global matrix, a function of 0x46c bytes, `+0x3b0` in it; layout pane array, a function of 0x1d0 bytes,  in it; pane constructor, a function of 0xfbc bytes,  in it; movie draw, a function of 0x158 bytes, `+0x64` in it; launcher capabilities: DYNAMIC_RESOLUTION, SCREEN_ASPECT
 
 ### The Legend of Zelda: Tears of the Kingdom
 

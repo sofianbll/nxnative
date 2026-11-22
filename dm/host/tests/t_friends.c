@@ -40,6 +40,21 @@ int main(void) {
     // The Uid form is a wait entry (HLE_FORCE_WAIT): its table function is the gate into entry.S, which only a guest thread may enter, so the check calls the hook itself
     Result (*key_uid)(void *, const void *, unsigned) = hook("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyERKNS_7account3UidEb") ? h_fr_GetPHKey : NULL;
     Result (*key_no_uid)(void *, int) = hook("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyEb");
+    // The shared provider hooks still fail with no entries while offline and never touch client storage.
+    if (hook("_ZN2nn7friends13GetFriendListEPiPNS_7account23NetworkServiceAccountIdEiiRKNS0_12FriendFilterE") &&
+        hook("_ZN2nn7friends13GetFriendListEPiPNS_7account23NetworkServiceAccountIdERKNS2_3UidEiiRKNS0_12FriendFilterE")) {
+        uint64_t output = 0x123456789abcdef0;
+        uint8_t filter[16] = {0};
+        int count = 7;
+        CHECK(h_fr_GetFriendIds(&count, &output, 0, 1, filter) == RES_FAIL && count == 0, "friend IDs remain unavailable offline");
+        count = 7;
+        CHECK(h_fr_GetFriendIdsUid(&count, &output, k_local, 0, 1, filter) == RES_FAIL && count == 0, "per-user friend IDs remain unavailable offline");
+        CHECK(output == 0x123456789abcdef0, "unavailable ID lists leave client storage untouched");
+        count = 7;
+        CHECK(h_fr_GetFriendIds(&count, NULL, 0, 0, filter) == RES_FAIL && count == 0, "zero-capacity ID query remains empty");
+        count = 7;
+        CHECK(h_fr_GetFriendIdsUid(&count, NULL, k_local, 0, 0, filter) == RES_FAIL && count == 0, "zero-capacity per-user ID query remains empty");
+    }
     uint8_t key[0x100], before[sizeof key];
     memset(before, 0xa5, sizeof before);
     const int local_args[] = {0, 1, 0x100, 0x101};   // guest bools may leave the upper register bits set (hle.h)

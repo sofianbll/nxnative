@@ -71,6 +71,14 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Found on:** [FINAL FANTASY X/X-2 HD Remaster](../../dm/games/0100BC300CB48000/README.md); after the fix its startup heap is 3.08 GB.
 - **Check:** the memory SVC tests compare used-memory queries with an ordinary large-bss module and a larger NRO present together.
 
+### Module data on the code's 16 KB page
+
+- **Symptom:** `CRASH sig=10 addr=nro<N>+0x… pc=relocate+…` with `lr=nro_load+…` under `h_ro_LoadModule` (or in `relocate` at startup for an NSO), at the first load of a module whose data starts below `text_end` rounded up to 16 KB; `x9` points at a RELA entry of type `0x403` (`R_AARCH64_RELATIVE`).
+- **Cause:** Horizon maps modules at 4 KB, the hosts at 16 KB. `map_image` (`loader.c`) seals `[0, text_end rounded up to 16 KB)` read + execute, and `gen_embed.py` puts the same range in the iOS executable's `__TEXT`, so any NSO or NRO whose data starts below that boundary has read-only data, and the first relocation into it faults. FINAL FANTASY VIII Remastered's Math.nro is text, ro and data of 4 KB each (data at `0x2000`); its Platform.nro has data at `0x3000`.
+- **Fix:** `dm/tools/mod_layout.py`, run by `patch_nso.py` on every NSO and NRO right after `nso.load()`, moves ro and data (and bss) up by whole 4 KB pages until data starts on a 16 KB page of its own, keeping `TEXT_END` at the true end of code and leaving on-disk `.nro` files and `nro.tsv` untouched. It rewrites the NRO header (when `NRO0`), `MOD0`, the dynamic tags, symbol values (excluding `STT_TLS`), RELA / JMPREL / RELR, the text's `adrp` / `adr` / literal loads into the moved part (skipping the `MOD0` offset at `+4` and in-text literal pools), and `.eh_frame_hdr` / `.eh_frame` (including LSDA `lpstart`). `read_layout` in `loader.c` stops with a message naming the module, not a SIGBUS, on a module rewritten before the fix.
+- **Found on:** [FINAL FANTASY VIII Remastered](../../dm/games/01008B900DC0A000/README.md) (Math.nro and Platform.nro of its 14 NROs).
+- **Check:** `dm/tools/tests/test_mod_layout.py` covers synthetic NRO and NSO images, `patch_nso.py` end-to-end, `MOD0` in text, `DT_RELR`, inline literal pools, `STT_TLS`, and `.eh_frame` / LSDA edge cases.
+
 ### Thread stacks backed by active NRO data
 
 - **Symptom:** repeated `[RED] MapMemory refused (0xd401)` for a stack source inside a loaded NRO's writable data, then an abort in `MapAliasStack` / `CreateThread`.
@@ -389,6 +397,13 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Fix:** the host reports each loaded module's real layout and reports other host memory as free (`hle_svc.c`).
 - **Found on:** [Fire Emblem Engage](../../dm/games/0100A6301214E000/README.md) (its note lists it among the host changes first needed there). IL2CPP throws a C++ exception for every managed exception, so Unity games need this; Mario ([Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md)) never threw.
 
+### `svcQueryMemory` walks the whole guest process
+
+- **Symptom:** the SDK's module enumeration keeps calling `svcQueryMemory` after it has seen the last module and the game stays before `nnMain`.
+- **Cause:** the SDK advances from address zero by each block's reported size. Outside the guest reservation the host reported one free 4 KiB page per query, so the walk kept going page by page across the host address space.
+- **Fix:** outside the guest reservation, report each free span up to the adjacent loaded module, front patch area, current stack or guest reservation. Borrowed ranges still split the result. Inactive NROs are free until loaded. At Darwin's user address limit, report a reserved block whose end wraps to zero, as Horizon does at its process limit.
+- **Found on:** [Hitman Absolution, PR #3023](https://github.com/seedds/nxnative/pull/3023) (v131072, SDK 22.2.0). After the [loader lookup fix](services.md#the-sdk-rejects-a-module-that-svcquerymemory-finds), the old map was still scanning at the 10 s cutoff. With the free spans and reserved tail, the same SDK completes both list passes.
+
 ### `MapPhysicalMemory` in 16 KB host pages
 
 - **Symptom:** `MapPhysicalMemory` faults on part of a page.
@@ -404,18 +419,19 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 
 ### Unmapped guest memory stays resident
 
-- **Symptom:** after a large `UnmapPhysicalMemory` or heap shrink, RAM does not come back. `phys_footprint` may still fall, so it hides this: the `guest` class in `DM_MEMSTAT` shows the real figure.
+- **Symptom:** after a large `UnmapPhysicalMemory`, heap shrink or repeated stack unmaps, RAM does not come back. `phys_footprint` may still fall. The `guest` class in `DM_MEMSTAT` reports residency.
 - **Cause:** on Darwin `mprotect(PROT_NONE)` only removes the page table entries. The pages stay resident and dirty, out of `phys_footprint`, and `madvise(MADV_FREE)` on pages that are not writable does nothing, though it returns 0. Measured on 1 GiB on the Mac: 1,024 MiB still resident and dirty, footprint 1.2 MiB.
 - **Fix:** `guest_release` (`hle_svc.c`) puts a fresh inaccessible mapping over the range (`MAP_FIXED`), which empties it at once and gives zero pages. `UnmapPhysicalMemory` then clears the range's exposed bits, so mapping it again needs no `memset`. A memory pool's no-copy buffer over the range keeps the old pages for the GPU until the buffer goes (measured: the GPU still reads the old data, the CPU sees zeros). A guest that unmaps and remaps under a pool it never finalized would see the two diverge, which Horizon does not allow, and neither does the host now: [Device-shared memory is not unmapped](#device-shared-memory-is-not-unmapped).
+- `MapMemory` dirties the destination when it copies a stack to its [randomly chosen address](#thread-stacks-placed-at-random-in-the-stack-region). After copying the contents back, `UnmapMemory` releases anonymous host pages wholly inside the destination. Partial edge pages can still hold a live 4 KiB neighbor. `MapMemory` reopens the pages on reuse. File-backed stacks retain their backing after copyback. The `t_svc_memory` test `stack_pages_released` checks the interior page, both neighbors and reuse.
 - **Found on:** [Pokémon Scarlet](../../dm/games/0100A3D008C5C000/README.md), one A/B on its 180 s route on the Mac: peak footprint 4,540 → 3,775 MiB, guest charged 1,809 → 1,372 MiB, 30 fps held. 437 MiB of the footprint drop is guest memory; the other 328 MiB is not explained. [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md) on its 95 s route: footprint flat (4,935 → 4,969 MiB), guest charged 1,887 → 1,685 MiB, with the baseline's pages partly compressed, so that drop is less certain. Open: the iPhone and Z-A, whose shader libraries were stale, were not measured.
 
 ### Device-shared memory is not unmapped
 
 - **Symptom:** the GPU hangs or stalls with no failing draw: compute shaders that read counts from a memory pool loop forever (on the Mac a silent stall right after the title screen; on an iPhone "Caused GPU Hang Error"), and text or other data in that pool comes out scrambled.
 - **Cause:** the game gives back pages of a live memory pool with `svcUnmapPhysicalMemory` and maps them again. On Horizon that call fails: NVN gives a pool's storage to the GPU through nvmap, whose device mapping (`LockForMapDeviceAddressSpace` → `KMemoryBlock::ShareToDevice`) sets `KMemoryAttribute_DeviceShared` on the pages, and `KPageTableBase::UnmapPhysicalMemory` refuses any page with an attribute set (ResultInvalidCurrentMemory, 0xD401), as does a `SetHeapSize` that shrinks (both read in Atmosphère's `kern_k_page_table_base.cpp`). The host accepted it: `guest_release` put fresh pages under the addresses while the pool's zero-copy `MTLBuffer` kept the old ones, so the CPU wrote one copy and the GPU read the other.
-- **Fix:** `hle_nvn.c` registers each pool's storage as device-shared at `nvnMemoryPoolInitialize` and removes it at `nvnMemoryPoolFinalize` (`dm_device_share`, counted, so two pools over the same storage keep it until both are gone). `hle_svc.c` refuses `UnmapPhysicalMemory` and a shrinking `SetHeapSize` that reach any of it with 0xD401 and changes nothing, as Horizon does, logging the first few (`[mem] UnmapPhysicalMemory … refused: it holds device-shared memory`). Only NVN pools are registered; Vulkan and OpenGL memory are not.
+- **Fix:** `hle_nvn.c` registers each NVN pool's storage at `nvnMemoryPoolInitialize` and unregisters it at `nvnMemoryPoolFinalize`. `dm_device_share` counts registrations over the same storage. As on Horizon, any device-shared page in an `UnmapMemory` destination, an `UnmapPhysicalMemory` range or a shrinking `SetHeapSize` range causes 0xD401 before the host changes the mapping. The host logs the first few refusals, for example `[mem] UnmapPhysicalMemory … refused: it holds device-shared memory`.
 - **Found on:** Monster Jam Steel Titans 2 (`010051B0131F0000`, 1.0.2), in [PR #1616](https://github.com/seedds/nxnative/pull/1616): the 2 MB pool holding Unreal's forward light data ring is unmapped and mapped again at frame 6, and its light-grid compute shaders read stale light counts (`0xff000000`); about ten other pools of that game go through the same. The PR followed the pages in the graphics layer instead. Open: this fix was not run on that game (no profile or game files here), so how the game takes the refusal is unknown. If it aborts, it never unmaps a live pool on hardware, and the host's list of live pools is wrong further up.
-- **Check:** `t_svc_memory` `device_shared_refused`: an unmap over any page of a registered range fails and leaves the pages, the mapped total and the bytes as they were; ranges beside or touching it still map and unmap; a range registered twice stays shared until both registrations go; a heap shrink over it fails, one that leaves it below the new end works.
+- **Check:** `t_svc_memory` `device_shared_refused` checks that unmap and heap shrink over a registered page leave the pages, mapped total and bytes intact. Ranges touching a registration can still be released. A range registered twice stays shared until both registrations are removed. A device-shared stack edge page blocks unmap and copyback.
 
 ### `GetInfo(UserExceptionContextAddress)` returns a real buffer
 
@@ -487,6 +503,14 @@ The guest address space, heaps, pools, virtual address memory and the allocators
 - **Fix:** `defer_drain` has its own `@autoreleasepool`.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): GitHub issue #9 (iPhone 16 Pro Max, handheld), killed in the first shrine. An 8 GB iPhone gives this app about 3.4 GB (resident plus `headroom to the system memory limit` stayed at 3,375 MB); resident memory grew from 2.6 GB at the shrine load until the kill. On the Mac a host without that pool grew 1 MB a frame in the shrine (GPU 3.0 → 4.4 GB in 2,400 frames); with it the shrine stays at 2.7–2.9 GB resident and 1.5–1.7 GB GPU, idle or walking (vmmap at 2.8 GB: about 1.6 GB guest memory, 0.75 GB private textures, 0.17 GB IOAccelerator).
 - **Note:** found on the way: dead texture serials and the fixed-size pool tracking table ([Dead texture serials kept in a ghost table](nvn-objects.md#dead-texture-serials-kept-in-a-ghost-table), [Memory-pool tracking table grows in blocks](nvn-objects.md#memory-pool-tracking-table-grows-in-blocks)).
+
+### Autoreleased temporaries collect during background pipeline builds
+
+- **Symptom:** Objective-C temporaries can accumulate across a burst of background pipeline builds.
+- **Cause:** the private utility queues inherit Dispatch's autorelease policy, and the global queues supply no pool for an individual work item. Worker-created autoreleased objects can live past the build that used them.
+- **Fix:** give each pending render, pulling-base, amplified, tile-reading and geometry mesh build its own `@autoreleasepool`. The worker publishes results to their owning slots or caches before the pool drains.
+- **Check:** a synthetic burst on an M4 Pro MacBook Pro (macOS 27.2.1) peaked at 256 live temporaries across 256 jobs on a serial utility queue, and one with a per-job pool. All five trials gave the same result. See the matched Mac load in [Ocarina of Time's memory notes](../../dm/games/0400486024DEC000/README.md#memory).
+- **Found on:** Esteban Viera identified the missing pools while auditing memory ownership during profiling of [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) in [PR #2714](https://github.com/seedds/nxnative/pull/2714).
 
 ### Retired pool buffers pile up while a game submits nothing
 

@@ -1,5 +1,6 @@
 // What the tests that link (or #include) hle_nvn.c and hle_bigstack.c without the host need of it: weak definitions, so a test that defines its own keeps it. Every such test links this file, so a new host symbol is stubbed here once
 #include <stdint.h>
+__attribute__((weak)) void dm_nextendo_presence_stop(void) {}   // t_pso_archive links the lifecycle without a social provider
 #ifdef DM_TEST_NVN_SDK
 int dm_test_sdk_ounce;
 int dm_sdk_ounce(void) { return dm_test_sdk_ounce; }   // t_nvn switches SDK targets through the real TextureInitialize boundary
