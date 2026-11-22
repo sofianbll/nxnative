@@ -348,7 +348,7 @@ $(B)/t_home_quit: t_home_quit.c ../home_quit.h | $(B)
 $(B)/t_home_quit_mac: t_home_quit_mac.m ../home_quit_mac.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -I.. -o $@ t_home_quit_mac.m -framework Cocoa -framework QuartzCore
 $(B)/t_game_overlay_mac: t_game_overlay_mac.m ../game_overlay_mac.h ../overlay_settings_mac.h ../home_quit.h ../home_quit_mac.h | $(B)
-	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -I.. -o $@ t_game_overlay_mac.m -framework Cocoa -framework QuartzCore -framework CoreImage
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -I.. -o $@ t_game_overlay_mac.m -framework Cocoa -framework QuartzCore -framework CoreImage -framework ImageIO
 run: $(B)/t_ctrl_prompt
 $(B)/t_ctrl_prompt: t_ctrl_prompt.c ../ctrl_prompt.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -I.. -o $@ t_ctrl_prompt.c

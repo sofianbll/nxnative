@@ -322,9 +322,9 @@ DM_OODLE_SERVE	switch	`=1`: the host answers decode requests on stdin / stdout w
 DM_OPENSSL_ROOT	path	Reviewed static OpenSSL prefix for optional online/BCAT helper compilation; no crypto dependency is downloaded by BCAT
 DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
 DM_OVERLAY_COVER	path	Optional absolute path to local cover art for the full Mac overlay (regular image file, at most 16 MiB)
+DM_OVERLAY_DATA	path	Launch-only absolute path to a read-only JSON snapshot for Profile, Friends and Achievements (see [Mac overlay](frontends.md#overlay-data)); absent tabs are hidden
 DM_OVERLAY_KEYS	player	Mac Quick access and full overlay keys, two distinct F1–F12 names separated by a comma (default `F9,F10`), or `0` to disable
 DM_OVERLAY_PLAY_TIME	switch	Optional preformatted lifetime play time for the full Mac overlay
-DM_OVERLAY_SOCIAL_V1	switch	Launch-only optional JSON with prelocalized plain-text `profile`, `friends` and `achievements` summaries; absent tabs are hidden
 DM_OVERLAY_TEST_ASSETS	test	`=<folder>` of stand-in images `bg.jpg` and `cover.png` read by the offline AppKit overlay PNG test
 DM_OVERLAY_TEST_SCREENS	test	`=<folder>` for `tests/t_game_overlay_mac.m` to write 1600×900 Quick access cards, full overlay tabs and standalone HUD PNGs (also set `DM_OVERLAY_TEST_ASSETS`)
 DM_OVERLAY_THEME_V1	switch	Launch-only JSON palette with `ink`, `surface`, `scrim`, `focus` and `onFocus` in `#RRGGBBAA`; invalid or low contrast values revert to Selene, never set in `env.txt`

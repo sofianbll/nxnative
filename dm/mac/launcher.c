@@ -86,7 +86,7 @@ static void env_file(const char *path) {   // KEY=VALUE lines, # starts a commen
         char *eq = strchr(s, '=');
         if (*s == '#' || !eq || eq == s) continue;
         *eq = 0; char *k = s; for (char *t = eq - 1; t > k && (*t == ' ' || *t == '\t'); t--) *t = 0;
-        if (!strcmp(k, "DM_OVERLAY_THEME_V1") || !strcmp(k, "DM_OVERLAY_SOCIAL_V1")) continue;   // temporary launcher metadata
+        if (!strcmp(k, "DM_OVERLAY_THEME_V1") || !strcmp(k, "DM_OVERLAY_DATA")) continue;   // temporary launcher metadata
         if (!getenv(k)) { setenv(k, eq + 1, 0); add_key(&g_file_keys, k); fprintf(stderr, "launcher: env %s=%s (%s)\n", k, eq + 1, path); }
     }
     fclose(f);

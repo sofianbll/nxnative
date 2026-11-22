@@ -109,6 +109,18 @@ static void screens(NSString *out, NSString *assets, NSRect bounds, NSDictionary
     }
     capture(out,@"hud-minimal",bounds,picture,nil,1);
     capture(out,@"hud-standard",bounds,picture,nil,2);
+    NSDictionary *empty=ov_social([@"{\"profile\":{},\"friends\":{\"items\":[]},\"achievements\":{}}" dataUsingEncoding:NSUTF8StringEncoding]);
+    for (NSArray *item in @[@[@(OV_PROFILE),@"profile-empty"],@[@(OV_FRIENDS),@"friends-empty"],
+        @[@(OV_FRIENDS),@"friends-private"],@[@(OV_ACHIEVEMENTS),@"achievements-empty"],@[@(OV_SETTINGS),@"settings-empty"]]) {
+        home_quit q={0}; hq_open(&q,HQ_FULL); q.tab=[item[0] intValue];
+        NSMutableDictionary *d=[sample mutableCopy]; d[@"background"]=blurred; d[@"social"]=empty;
+        d[@"canArcane"]=@NO;
+        [d removeObjectsForKeys:@[@"total",@"controllerRows",@"network"]];
+        d[@"controllers"]=@"0 connectée"; d[@"ldn"]=@"LDN désactivé"; d[@"volume"]=@"100 %";
+        if ([item[1] isEqual:@"friends-private"])
+            d[@"social"]=ov_social([@"{\"friends\":{\"shared\":false}}" dataUsingEncoding:NSUTF8StringEncoding]);
+        capture(out,[@"overlay-full-" stringByAppendingString:item[1]],bounds,nil,ov_view(bounds,q,d,theme,unused),0);
+    }
 }
 
 int main(void) {
@@ -117,6 +129,17 @@ int main(void) {
         settings();
         assert(([ov_tabs(nil) isEqual:@[@(OV_SESSION),@(OV_SETTINGS)]]));
         assert(([ov_tabs(@{@(OV_FRIENDS):@"Friends"}) isEqual:@[@(OV_SESSION),@(OV_FRIENDS),@(OV_SETTINGS)]]));
+        assert(!ov_social([@"[]" dataUsingEncoding:NSUTF8StringEncoding]).count);
+        assert(![ov_social([@"{\"achievements\":null}" dataUsingEncoding:NSUTF8StringEncoding]) objectForKey:@(OV_ACHIEVEMENTS)]);
+        NSDictionary *social=ov_social([NSJSONSerialization dataWithJSONObject:@{
+            @"profile":@{@"name":@"Koya Mori",@"nextendo":@"Koya",@"status":@"online",@"week":@"2 h 14 min",@"color":@"#9CCBFF"},
+            @"friends":@{@"items":@[
+                @{@"name":@"Milo",@"status":@"offline"},@{@"name":@"Lina",@"status":@"playing",@"game":@"Pokémon Legends: Z-A",@"color":@"#AFA7FA"},
+                @{@"name":@"Camille",@"status":@"online",@"color":@"#75DBAC"},@{@"name":@"Noa",@"status":@"offline"},@{@"name":@"Sacha",@"status":@"offline"}]},
+            @"achievements":@{@"unlocked":@12,@"total":@50,@"recent":@[@"Premiers pas",@"Explorateur d’Illumis",@"Premier partenaire"]}
+        } options:0 error:NULL]);
+        assert([social[@(OV_FRIENDS)][@"online"] intValue]==2);
+        assert([social[@(OV_FRIENDS)][@"items"][0][@"name"] isEqual:@"Lina"]);
         home_quit small = {0}; hq_open(&small,HQ_FULL);
         NSRect smallBounds = NSMakeRect(0,0,640,360);
         NSView *smallView = ov_view(smallBounds,small,@{@"actions":@[@"Resume",@"Quit"]},ov_theme(nil),^(NSInteger a,NSInteger i) { (void)a; (void)i; });
@@ -132,10 +155,7 @@ int main(void) {
             @"ldn":@"Salon LDN actif", @"ldnActive":@YES, @"volume":@"65 %",
             @"clock":@"21:42", @"canQuit":@YES, @"actions":@[@"Reprendre",@"Retour à Arcane",@"Quitter"],
             @"preset":@1, @"position":@"En haut à droite", @"size":@"Petit", @"opacity":@"50 %", @"scope":@"Pour ce jeu",
-            @"quitTitle":@"Quitter Pokémon Legends: Z-A ?",
-            @"social":@{@(OV_PROFILE):@"Koya\nCompte Nextendo · En ligne",
-                        @(OV_FRIENDS):@"Lina · En ligne\nMilo · Hors ligne",
-                        @(OV_ACHIEVEMENTS):@"3 succès obtenus\n\nPremiers pas · Explorateur d’Illumis · Premier partenaire"}} mutableCopy];
+            @"quitTitle":@"Quitter Pokémon Legends: Z-A ?", @"social":social, @"canArcane":@YES} mutableCopy];
         for (int full=0; full<2; full++) {
             home_quit q = {0}; hq_open(&q,full ? HQ_FULL : HQ_QUICK);
             if (!full) q.card = HQ_HUD;
@@ -160,6 +180,20 @@ int main(void) {
             }
             assert(chosen == 1 && action == OV_CONFIRM && index == 0);
         }
+        home_quit full = {0}; hq_open(&full,HQ_FULL); full.tab=OV_SETTINGS;
+        __block NSInteger used=-1, row=-1;
+        void (^picked)(NSInteger,NSInteger)=^(NSInteger a,NSInteger i) { used=a; row=i; };
+        NSView *settingsView=ov_view(bounds,full,d,ov_theme(nil),picked);
+        for (NSView *child in settingsView.subviews) if ([child isKindOfClass:NSButton.class]) {
+            assert(![child.accessibilityLabel isEqual:@"Quitter"]);
+            if ([child.accessibilityLabel isEqual:@"Augmenter — HUD"]) [(NSButton *)child performClick:nil];
+        }
+        assert(used==OV_VALUE && row==HQ_HUD);
+        full.tab=OV_PROFILE;
+        NSView *profile=ov_view(bounds,full,d,ov_theme(nil),picked);
+        for (NSView *child in profile.subviews)
+            if ([child.accessibilityLabel isEqual:@"Voir dans Arcane"]) [(NSButton *)child performClick:nil];
+        assert(used==OV_MAIN && row==0);
         if (out && assets) {
             d[@"cover"] = [[NSImage alloc] initWithContentsOfFile:[@(assets) stringByAppendingPathComponent:@"cover.png"]];
             assert(d[@"cover"]);

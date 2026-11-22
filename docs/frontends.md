@@ -76,11 +76,25 @@ The Mac overlay does not pause the game. Tap Home to open **Session** and **Game
 
 For localization, `DM_HOME_QUIT_TEXT` still uses lines 2–8 for confirmation title, warning, Quit, Cancel, Resume, launcher return and game title, respectively. Line 1 was the old two-second-quit instruction and is ignored. Built-in strings are French or English according to macOS's preferred language; empty or absent launcher lines retain those defaults.
 
-Launchers may pass `DM_OVERLAY_COVER` (absolute path to a local image) and `DM_OVERLAY_PLAY_TIME` (formatted total play time). `DM_OVERLAY_SOCIAL_V1` is an optional launch-only JSON object with `profile`, `friends` and `achievements` as prelocalized plain-text summaries, at most 4095 UTF-8 bytes in total; each tab is hidden without a nonblank summary. Capture is not shown without a capture provider. The Nextendo fact uses only the host's cached sign-in and online-play permission, not a new request or a claim that the game has joined a server.
+Launchers may pass `DM_OVERLAY_COVER` (absolute path to a local image) and `DM_OVERLAY_PLAY_TIME` (formatted total play time). Capture is not shown without a capture provider. The Session Nextendo fact uses only the host's cached sign-in and online-play permission, not a new request or a claim that the game has joined a server.
 
 `DM_OVERLAY_THEME_V1` is an optional launch-only JSON object: `{"ink":"#FFFFFFFF","surface":"#14181FF5","scrim":"#000000FF","focus":"#FFFFFFFF","onFocus":"#111111FF"}`. Supply exactly these five keys in any order, with `#RRGGBBAA` sRGB strings; duplicates, unknown keys, invalid values and poor text/focus contrast use the built-in Selene palette. Do not write the theme to `env.txt`: the Mac launcher ignores it there.
 
 `DM_HOME_MENU_LAUNCHER=1` opts in to the **Return to Arcane** action and the existing notifications below. It is not needed for either overlay.
+
+#### Overlay data
+
+Set `DM_OVERLAY_DATA` in the launch environment to the absolute path of a UTF-8 JSON file in the game's temporary directory. The Mac host reads the snapshot once at startup, never writes or fetches it, and ignores the key in `env.txt`. Use a regular file owned by the current user, not writable by group/others (for example mode `0600`), no symlink, at most 512 KiB. The optional top-level objects each enable one tab; omit a section if you do not have its data. An empty object shows its empty state instead. This replaces the old plain-text `DM_OVERLAY_SOCIAL_V1`.
+
+```json
+{
+  "profile": {"name":"Koya Mori","color":"#9CCBFF","nextendo":"Koya","status":"online","week":"2 h 14 min"},
+  "friends": {"shared":true,"items":[{"name":"Lina","status":"playing","game":"Pokémon Legends: Z-A"},{"name":"Milo","status":"offline"}]},
+  "achievements": {"total":50,"unlocked":12,"recent":["Premiers pas","Explorateur d’Illumis"]}
+}
+```
+
+`profile` and each friend can optionally have an `avatar` (base64 PNG or JPEG, no data-URL prefix, at most 128 KiB encoded) and `color` (`#RRGGBB`); without an image the host draws initials. Text fields are single-line and at most 160 characters; `week` and `DM_OVERLAY_PLAY_TIME` are preformatted durations. Status values are `playing`, `online` and `offline`; missing/unknown means presence not shared. `friends.shared:false` suppresses the list and counts; up to 100 entries are read, online first. Send `recent` titles newest first; the host shows up to four. **View in Arcane** uses the same handoff as **Return to Arcane**, only when authorized by `DM_HOME_MENU_LAUNCHER=1`. No credentials, URLs or private tokens belong in the file.
 
 #### Free the Home button for the overlay
 

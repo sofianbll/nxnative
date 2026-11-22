@@ -602,6 +602,25 @@ static NSString *ov_env(const char *name) {
     const char *text = getenv(name);
     return text && strlen(text) < 4096 && *text ? [NSString stringWithUTF8String:text] : nil;
 }
+static NSDictionary *ov_load_data(NSString *path) {
+    if (![path isAbsolutePath]) return nil;
+    int fd=open(path.fileSystemRepresentation,O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);
+    if (fd<0) return nil;
+    struct stat st;
+    NSMutableData *data=nil;
+    if (!fstat(fd,&st) && S_ISREG(st.st_mode) && st.st_uid==getuid() && !(st.st_mode&022) && st.st_size>0 && st.st_size<=512*1024) {
+        data=[NSMutableData dataWithLength:(NSUInteger)st.st_size];
+        size_t pos=0;
+        while (pos<data.length) {
+            ssize_t n=read(fd,(char *)data.mutableBytes+pos,data.length-pos);
+            if (n<0 && errno==EINTR) continue;
+            if (n<=0) { data=nil; break; }
+            pos+=(size_t)n;
+        }
+    }
+    close(fd);
+    return ov_social(data);
+}
 static void hq_start(void) {
     g_hq.disabled = !hq_enabled(getenv("DM_HOME_MENU"));
     g_hq.no_hold = !hq_enabled(getenv("DM_HOME_QUIT"));
@@ -610,20 +629,7 @@ static void hq_start(void) {
     g_ov_keys_down = [NSMutableIndexSet new];
     ov_keys(getenv("DM_OVERLAY_KEYS"), g_ov_keys);
     g_ov_theme = ov_theme(ov_env("DM_OVERLAY_THEME_V1"));
-    NSString *social = ov_env("DM_OVERLAY_SOCIAL_V1");
-    if (social) {
-        id json = [NSJSONSerialization JSONObjectWithData:[social dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
-        if ([json isKindOfClass:NSDictionary.class]) {
-            NSMutableDictionary *tabs = [NSMutableDictionary dictionary];
-            NSArray *keys = @[@"profile",@"friends",@"achievements"];
-            for (NSUInteger i=0; i<keys.count; i++) {
-                id value = json[keys[i]];
-                if ([value isKindOfClass:NSString.class] && [[value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] length])
-                    tabs[@(OV_PROFILE+i)] = value;
-            }
-            g_ov_social = tabs;
-        }
-    }
+    g_ov_social = ov_load_data(ov_env("DM_OVERLAY_DATA"));
     g_ov_started = CACurrentMediaTime();
     g_ov_game = [@"game-" stringByAppendingString:@(DM_GAME_ID)];
     g_hud_store = [[NSUserDefaults alloc] initWithSuiteName:@"org.nxnative.overlay"];
@@ -743,8 +749,11 @@ static void hq_tick(void) {
 }
 static void hq_hide_hold(void) { [g_hq_hold removeFromSuperview]; g_hq_hold = nil; g_hq_ring = nil; }
 static int hq_count(void) {
-    if (g_hq.tab >= OV_PROFILE) return 0;
-    return g_hq.phase == HQ_QUICK || g_hq.tab ? HQ_POWER + !g_hq.no_hold : 1 + g_hq_arcane + !g_hq.no_hold;
+    if (g_hq.tab == OV_PROFILE) return g_hq_arcane && ov_string(g_ov_social[@(OV_PROFILE)][@"name"]) != nil;
+    if (g_hq.tab == OV_FRIENDS) return (int)[g_ov_social[@(OV_FRIENDS)][@"items"] count];
+    if (g_hq.tab == OV_ACHIEVEMENTS) return 0;
+    if (g_hq.tab == OV_SETTINGS) return HQ_POWER;
+    return g_hq.phase == HQ_QUICK ? HQ_POWER + !g_hq.no_hold : 1 + g_hq_arcane + !g_hq.no_hold;
 }
 static void hq_action(NSInteger action, NSInteger index);
 static void hq_hide(void) {
@@ -803,6 +812,7 @@ static void hq_show(void) {
     } mutableCopy];
     d[@"cover"] = g_ov_cover; d[@"total"] = ov_env("DM_OVERLAY_PLAY_TIME");
     d[@"social"] = g_ov_social;
+    d[@"canArcane"] = @(g_hq_arcane);
     if (g_ov_help_visible) {
         if (@available(macOS 27.0,*)) d[@"homeHelp"] = ov_home_help(fr,YES);
         else d[@"homeHelp"] = ov_home_help(fr,NO);
@@ -876,7 +886,9 @@ static void hq_action(NSInteger action, NSInteger index) {
     case OV_MAIN:
         if (g_hq.confirm || index < 0 || index >= hq_count()) return;
         g_hq.selection=(int)index; g_hq.row=0;
-        if (was==HQ_QUICK || g_hq.tab) {
+        if (g_hq.tab==OV_PROFILE) g_hq.phase=HQ_PAUSED;
+        else if (g_hq.tab==OV_FRIENDS) break;
+        else if (was==HQ_QUICK || g_hq.tab==OV_SETTINGS) {
             if (index==HQ_POWER) g_hq.confirm=1;
             else g_hq.card=(int)index;
         } else if (!index) g_hq.phase=HQ_SETTLE;
@@ -885,6 +897,13 @@ static void hq_action(NSInteger action, NSInteger index) {
         break;
     case OV_ROW:
         g_hq.row=(int)(index<0 ? -index-1 : index); hq_adjust(index<0 ? -1 : 1); break;
+    case OV_VALUE: {
+        int item=(int)(index<0 ? -index-1 : index);
+        if (g_hq.tab!=OV_SETTINGS || g_hq.card>=0 || item<0 || item>HQ_VOLUME) return;
+        g_hq.selection=g_hq.card=item; g_hq.row=0;
+        hq_adjust(index<0 ? -1 : 1); g_hq.card=-1;
+        break;
+    }
     case OV_PRESET:
         if (g_hq.card==HQ_HUD && index>=0 && index<4) {
             g_hq.row=0; g_hud=ov_hud_preset((int)index,g_hud.local); ov_hud_save(g_hud_store,g_ov_game,g_hud); hud_apply();
@@ -911,6 +930,8 @@ static void hq_nav(unsigned nav) {
     else if (g_hq.card>=0) {
         if (g_hq.card==HQ_HUD && vertical) g_hq.row=hq_clamp(g_hq.row+vertical,4);
         if (horizontal) hq_adjust(horizontal);
+    } else if (g_hq.tab==OV_SETTINGS && horizontal && !vertical && g_hq.selection<=HQ_VOLUME) {
+        hq_action(OV_VALUE,horizontal>0 ? g_hq.selection : -g_hq.selection-1); return;
     } else if (hq_count()) g_hq.selection=hq_clamp(g_hq.selection+(g_hq.tab ? vertical : horizontal ? horizontal : vertical),hq_count()-1);
     hq_show();
 }
