@@ -170,6 +170,7 @@ static ctrl_prompt g_cp; static int g_cp_confirm, g_cp_cancel;   // the controll
 static int cp_poll(void);
 static int hq_menu_key(unsigned short code, int down);
 static NSMutableIndexSet *g_ov_keys_down;
+static _Atomic int g_ov_display_motion_blocked;
 static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
     unsigned short c = e.keyCode;
@@ -239,7 +240,7 @@ static void pad_read(GCExtendedGamepad *g) {
     #undef K
     if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: it joins at its first button
         GCController *c = g.controller; if (!m || (p = pad_join((__bridge const void *)c, pad_name(c))) < 0) return;
-        g_held[p] = c; dm_motion_attach(c, p); pads_motion_changed(nil);
+        g_held[p] = c; dm_motion_attach_gated(c,p,&g_ov_display_motion_blocked); pads_motion_changed(nil);
     }
     if (cp_poll()) return;   // the controller applet's prompt has the controllers (front_ctrl_support)
     if (m) merge_rumble_to(NULL);   // DM_PAD_MERGE: a button on this controller takes player 1's rumble back from a Switch 2 pad or Joy-Cons read from HID
@@ -294,7 +295,7 @@ static void pads_changed(GCController *gone) {
         for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) {
             if (jc1_gc_unread(c)) { c.extendedGamepad.valueChangedHandler = nil; continue; }
             any = 1; pad_keep_system_buttons(c); c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
-            dm_motion_attach(c, 0);   // every controller is player 1: the last one moved drives its six-axis sensor
+            dm_motion_attach_gated(c,0,&g_ov_display_motion_blocked);   // every controller is player 1: the last one moved drives its six-axis sensor
             pad_read(c.extendedGamepad);
         }
         if (gone) dm_motion_detach(gone, 0);
@@ -325,7 +326,7 @@ static void pads_changed(GCController *gone) {
         if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
         g_held[p] = c; pad_keep_system_buttons(c);
         c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
-        dm_motion_attach(c, p);
+        dm_motion_attach_gated(c,p,&g_ov_display_motion_blocked);
         npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)%s", pad_name(c), p + 1, nb, c.motion.hasRotationRate ? ", with motion (gyro)" : "");
         pad_read(c.extendedGamepad);
     }
@@ -383,7 +384,7 @@ static void input_release(void) {
 static void input_resume(void) {
     display_awake(1);
     g_input_on = 1;
-    dm_motion_pro_active(1);
+    dm_motion_pro_active(!g_ov_display_motion_blocked);
     dm_switch2_active(1); dm_jc1_active(1);
     for (GCController *c in GCController.controllers) hq_home_preference(c);
     pads_reread();
@@ -425,7 +426,7 @@ static void hidpad_attach(hid_pad *d) {
     hidpad_read(d);
 }
 static void hidpad_motion(hid_pad *d, const float acc[3], const float rot[3], uint64_t ns) {
-    int p = g_input_on && !g_merge ? pad_slot_of(&g_slots, d) : -1; if (p < 0) return;
+    int p = g_input_on && !g_merge && !g_ov_display_motion_blocked ? pad_slot_of(&g_slots, d) : -1; if (p < 0) return;
     dm_motion_set_hid(p, acc, rot, ns);
 }
 static void hidpad_models_changed(void) { pads_changed(nil); }
@@ -549,6 +550,9 @@ static NSDictionary *g_ov_social;
 static NSUserDefaults *g_hud_store;
 static ov_hud g_hud;
 static BOOL g_hud_live;   // Metal's HUD was enabled before the first device, so its properties change live
+static NSString *g_hud_notice;
+static NSArray *g_ov_shoulders;
+static int g_bg_fs_transition;
 static int g_ov_volume = 100;
 static unsigned g_hq_pulse_serial;
 static unsigned short g_ov_keys[2];
@@ -597,6 +601,7 @@ static void hq_start(void) {
     g_ov_game = [@"game-" stringByAppendingString:@(DM_GAME_ID)];
     g_hud_store = [[NSUserDefaults alloc] initWithSuiteName:@"org.nxnative.overlay"];
     g_hud = ov_hud_load(g_hud_store, g_ov_game);
+    g_hq.swap = ov_home_swap_load(g_hud_store,getenv("DM_OVERLAY_HOME_SWAP"));
     if (!hud_forced()) hud_apply();   // DM_METAL_HUD=1 keeps Apple's own look until the card is used
     NSString *cover = ov_env("DM_OVERLAY_COVER");
     if ([cover isAbsolutePath]) {
@@ -646,6 +651,7 @@ static void hq_home_preference(GCController *c) {
 static unsigned hq_pad_bits(uint64_t m, const int32_t s[4]) {
     return (m & DM_BTN_Y ? HQ_Y : 0) | (m & DM_BTN_PLUS ? HQ_PLUS : 0) |
         (m & DM_BTN_L ? HQ_L : 0) | (m & DM_BTN_R ? HQ_R : 0) |
+        (m & DM_BTN_ZL ? HQ_ZL : 0) | (m & DM_BTN_ZR ? HQ_ZR : 0) |
         (m & DM_BTN_LEFT ? HQ_LEFT : 0) | (m & DM_BTN_RIGHT ? HQ_RIGHT : 0) |
         (m & DM_BTN_UP ? HQ_UP : 0) | (m & DM_BTN_DOWN ? HQ_DOWN : 0) | hq_stick_bits(s) |
         (m & ~(DM_BTN_Y|DM_BTN_PLUS|DM_BTN_LEFT|DM_BTN_RIGHT|DM_BTN_UP|DM_BTN_DOWN|DM_BTN_L|DM_BTN_R) ? HQ_OTHER : 0);
@@ -660,18 +666,28 @@ static unsigned hq_buttons(int *menu_player) {
         if (g.buttonMenu.isPressed) { bits |= HQ_PLUS; *menu_player = g_merge ? 0 : pad_slot_of(&g_slots,(__bridge const void *)c); }
         int32_t s[4] = {pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value),
                         pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value)};
-        bits |= (g.buttonA.isPressed ? HQ_A : 0) | (g.buttonB.isPressed ? HQ_B : 0) | (g.buttonY.isPressed ? HQ_Y : 0) |
+        unsigned padBits = (g.buttonA.isPressed ? HQ_A : 0) | (g.buttonB.isPressed ? HQ_B : 0) | (g.buttonY.isPressed ? HQ_Y : 0) |
             (g.leftShoulder.isPressed ? HQ_L : 0) | (g.rightShoulder.isPressed ? HQ_R : 0) |
+            (g.leftTrigger.value>.25f ? HQ_ZL : 0) | (g.rightTrigger.value>.25f ? HQ_ZR : 0) |
             (g.dpad.left.isPressed ? HQ_LEFT : 0) | (g.dpad.right.isPressed ? HQ_RIGHT : 0) |
             (g.dpad.up.isPressed ? HQ_UP : 0) | (g.dpad.down.isPressed ? HQ_DOWN : 0) | hq_stick_bits(s) |
-            (g.buttonX.isPressed || g.buttonOptions.isPressed || g.leftTrigger.value>.25f || g.rightTrigger.value>.25f ||
+            (g.buttonX.isPressed || g.buttonOptions.isPressed ||
              g.leftThumbstickButton.isPressed || g.rightThumbstickButton.isPressed ? HQ_OTHER : 0);
+        bits |= padBits;
+        if (padBits || home.isPressed || g.buttonMenu.isPressed) {
+            NSString *kind=[NSString stringWithFormat:@"%@ %@",c.productCategory,c.vendorName];
+            g_ov_shoulders=([kind containsString:@"Dual"] || [kind containsString:@"PlayStation"]) ? @[@"L1",@"R1",@"L2",@"R2"] :
+                ([kind containsString:@"Nintendo"] || [kind containsString:@"Switch"] || [kind containsString:@"Joy-Con"]) ? @[@"L",@"R",@"ZL",@"ZR"] :
+                @[@"LB",@"RB",@"LT",@"RT"];
+        }
     }
     for (s2_pad *d = dm_switch2_pads(); d; d = d->next) {
         int a=0,b=0; s2_pad_ab(&d->st,&a,&b);
         bits |= (a ? HQ_A : 0) | (b ? HQ_B : 0) | (s2_pad_home(&d->st) ? HQ_HOME : 0);
         uint64_t m; int32_t s[4];
-        if (s2_pad_input(&d->st,&m,s)) { bits |= hq_pad_bits(m,s); if (m & DM_BTN_PLUS) *menu_player = s2pad_player(d); }
+        unsigned local=0;
+        if (s2_pad_input(&d->st,&m,s)) { bits |= local=hq_pad_bits(m,s); if (m & DM_BTN_PLUS) *menu_player = s2pad_player(d); }
+        if (local || a || b || s2_pad_home(&d->st)) g_ov_shoulders=@[@"L",@"R",@"ZL",@"ZR"];
         // A pair's Pro-style mapping drops the rail buttons that its native Joy-Con path still sends.
         if ((d->st.left.have && (d->st.left.r.buttons & (S2_SL_L|S2_SR_L))) ||
             (d->st.right.have && (d->st.right.r.buttons & (S2_SL_R|S2_SR_R)))) bits |= HQ_OTHER;
@@ -680,7 +696,9 @@ static unsigned hq_buttons(int *menu_player) {
         int a=0,b=0; jc1_pad_ab(d,&a,&b);
         bits |= (a ? HQ_A : 0) | (b ? HQ_B : 0) | (jc1_pad_home(d) ? HQ_HOME : 0);
         uint64_t m; int32_t s[4];
-        if (jc1_pad_state(d,&m,s)) { bits |= hq_pad_bits(m,s); if (m & DM_BTN_PLUS) *menu_player = jc1pad_player(d); }
+        unsigned local=0;
+        if (jc1_pad_state(d,&m,s)) { bits |= local=hq_pad_bits(m,s); if (m & DM_BTN_PLUS) *menu_player = jc1pad_player(d); }
+        if (local || a || b || jc1_pad_home(d)) g_ov_shoulders=@[@"L",@"R",@"ZL",@"ZR"];
         for (int i = 0; i < 2; i++)
             if (d->side[i] && d->side[i]->have && (d->side[i]->buttons & (DM_BTN_LSL|DM_BTN_LSR|DM_BTN_RSL|DM_BTN_RSR))) bits |= HQ_OTHER;
     }
@@ -693,6 +711,7 @@ static unsigned hq_buttons(int *menu_player) {
         if (d->st.layout != PAD_HID_NINTENDO && !full) bits |= (m & DM_BTN_A ? HQ_A : 0) | (m & DM_BTN_B ? HQ_B : 0);
         hidpad_menu_dirs(d,&up,&down,DM_STICK_MAX*HQ_STICK);
         bits |= hq_pad_bits(m,full ? d->pro_s : s) | (up ? HQ_UP : 0) | (down ? HQ_DOWN : 0);
+        if ((m || q) && (full || d->st.layout == PAD_HID_NINTENDO)) g_ov_shoulders=@[@"L",@"R",@"ZL",@"ZR"];
         if (m & DM_BTN_PLUS) *menu_player = hidpad_player(d);
     }
     return bits;
@@ -715,7 +734,7 @@ static int hq_count(void) {
     if (g_hq.tab == OV_PROFILE) return g_hq_arcane && ov_string(g_ov_social[@(OV_PROFILE)][@"name"]) != nil;
     if (g_hq.tab == OV_FRIENDS) return (int)[g_ov_social[@(OV_FRIENDS)][@"items"] count];
     if (g_hq.tab == OV_ACHIEVEMENTS) return 0;
-    if (g_hq.tab == OV_SETTINGS) return HQ_POWER;
+    if (g_hq.tab == OV_SETTINGS) return HQ_HOME_SETTING+1;
     return g_hq.phase == HQ_QUICK ? HQ_POWER + !g_hq.no_hold : 1 + g_hq_arcane + !g_hq.no_hold;
 }
 static void hq_action(NSInteger action, NSInteger index);
@@ -751,7 +770,6 @@ static void hq_show(void) {
         return x<y ? NSOrderedAscending : x>y ? NSOrderedDescending : [a[@"name"] compare:b[@"name"]];
     }];
     BOOL fr = g_ov_fr;
-    NSArray *pos = @[@"Top left",@"Top right",@"Bottom left",@"Bottom right"], *sizes = @[@"Small",@"Medium",@"Large"];
     NSMutableArray *actions = [NSMutableArray arrayWithObject:@(g_hq_text[HQ_TEXT_RESUME])];
     if (g_hq_arcane) [actions addObject:@(g_hq_text[HQ_TEXT_CONSOLE])];
     if (!g_hq.no_hold) [actions addObject:@(g_hq_text[HQ_TEXT_QUIT])];
@@ -764,14 +782,16 @@ static void hq_show(void) {
         @"controllers":[NSString stringWithFormat:@"%lu %@",(unsigned long)pads.count,ov_text(fr,@"connected")],
         @"controllerRows":pads, @"actions":actions, @"canQuit":@(!g_hq.no_hold),
         @"resume":@(g_hq_text[HQ_TEXT_RESUME]), @"quitTitle":@(g_hq_text[HQ_TEXT_TITLE]), @"quitLabel":@(g_hq_text[HQ_TEXT_QUIT]),
-        @"quitNote":@(g_hq_text[HQ_TEXT_NOTE]), @"cancel":@(g_hq_text[HQ_TEXT_CANCEL]), @"preset":@(g_hud.preset), @"hudLater":@(g_hud.preset && !g_hud_live),
-        @"position":ov_text(fr,pos[g_hud.position]), @"size":ov_text(fr,sizes[g_hud.size]),
-        @"opacity":[NSString stringWithFormat:@"%d %%",ov_hud_opacity[g_hud.opacity]],
+        @"quitNote":@(g_hq_text[HQ_TEXT_NOTE]), @"cancel":@(g_hq_text[HQ_TEXT_CANCEL]), @"preset":@(g_hud.preset), @"hudLater":@(g_hud.enabled && !g_hud_live),
+        @"position":@(g_hud.position), @"scale":@(g_hud.scale), @"opacity":@(g_hud.opacity),
+        @"hudOptions":@(g_hud.options), @"hudElements":@(g_hud.elements), @"hudEnabled":@(g_hud.enabled),
+        @"fullscreen":@((g_win.styleMask & NSWindowStyleMaskFullScreen)!=0),
         @"scope":ov_text(fr,g_hud.local ? @"For this game" : @"For all games"),
         @"volume":[NSString stringWithFormat:@"%d %%",g_ov_volume],
         @"ldn":ov_text(fr,ldnActive ? @"LDN room active" : dm_net_ldn_enabled() ? @"LDN enabled" : @"LDN disabled"),
         @"ldnActive":@(ldnActive)
     } mutableCopy];
+    d[@"hudNotice"]=g_hud_notice; d[@"shoulders"]=g_ov_shoulders;
     d[@"cover"] = g_ov_cover; d[@"total"] = ov_env("DM_OVERLAY_PLAY_TIME");
     d[@"social"] = g_ov_social;
     d[@"canArcane"] = @(g_hq_arcane);
@@ -813,27 +833,89 @@ static void hq_changed(hq_phase was) {
         hq_show();
     } else {
         g_ov_help_visible = NO;
+        g_hud_notice = nil;
         if (hq_visible(was)) hq_hide();
-        if (next == HQ_IDLE && was == HQ_SETTLE) pads_reread();
+        if (next == HQ_IDLE && was == HQ_SETTLE) {
+            if (atomic_exchange(&g_ov_display_motion_blocked,0)) dm_motion_pro_active(g_input_on);
+            pads_reread();
+        }
         if (next == HQ_QUIT) [NSApp terminate:nil];
         if (next == HQ_PAUSED) bg_enter();
     }
     hq_tick();
 }
 static int hq_clamp(int v, int max) { return v < 0 ? 0 : v > max ? max : v; }
+static void hud_save(void) { ov_hud_save(g_hud_store,g_ov_game,g_hud); hud_apply(); }
+static BOOL hud_slider_row(void) {
+    return g_hq.card==HQ_HUD && !g_hq.advanced && (g_hq.row==HUD_OPACITY_ROW || g_hq.row==HUD_SCALE_ROW);
+}
+static void hud_slide(double value, BOOL relative) {
+    BOOL scale=g_hq.row==HUD_SCALE_ROW; double *n=scale ? &g_hud.scale : &g_hud.opacity;
+    *n=ov_hud_unit(relative ? *n+value : value,scale ? .1 : 0);
+    g_hud_notice=nil;
+}
 static void hq_adjust(int step) {
     if (g_hq.card == HQ_VOLUME) {
         g_ov_volume = hq_clamp(g_ov_volume + 5*step,100); dm_audio_game_volume(g_ov_volume);
     } else if (g_hq.card == HQ_HUD) {
-        switch (g_hq.row) {
-        case 0: g_hud.preset = hq_clamp(g_hud.preset+step,3); break;
-        case 1: g_hud.position = hq_clamp(g_hud.position+step,3); break;
-        case 2: g_hud.size = hq_clamp(g_hud.size+step,2); break;
-        case 3: g_hud.opacity = hq_clamp(g_hud.opacity+step,4); break;
-        case 4: g_hud.local = !g_hud.local; break;
-        }
-        ov_hud_save(g_hud_store,g_ov_game,g_hud); hud_apply();
+        int row=g_hq.row;
+        g_hud_notice=nil;
+        if (g_hq.advanced) {
+            if (row==HUD_SCOPE) g_hud.local=!g_hud.local;
+            else if (row==HUD_PASTE) {
+                NSUInteger ignored;
+                BOOL pasted=ov_hud_import([NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString],&g_hud,&ignored);
+                g_hud_notice=ov_text(g_ov_fr,pasted ? @"Configuration pasted" : @"No valid HUD configuration");
+                if (ignored) g_hud_notice=[g_hud_notice stringByAppendingFormat:@" · %@",[NSString stringWithFormat:ov_text(g_ov_fr,@"Ignored: %lu"),(unsigned long)ignored]];
+                if (!pasted) return;
+            } else if (row==HUD_COPY) {
+                NSPasteboard *board=NSPasteboard.generalPasteboard;
+                [board clearContents];
+                if ([board setString:ov_hud_export(g_hud) forType:NSPasteboardTypeString]) g_hud_notice=ov_text(g_ov_fr,@"Configuration copied");
+                return;
+            } else if (row==HUD_ENABLE) {
+                g_hud.enabled=!g_hud.enabled;
+                if (g_hud.enabled && g_hud.preset==HUD_OFF) ov_hud_select(&g_hud,HUD_FPS);
+                else g_hud.preset=HUD_CUSTOM;
+            }
+            else if (row<HUD_FIRST_METRIC) g_hud.options^=1u<<(row-HUD_FIRST_OPTION);
+            else { g_hud.elements^=ov_hud_metrics[row-HUD_FIRST_METRIC].bit; g_hud.preset=HUD_CUSTOM; }
+        } else if (row==HUD_PRESET_ROW) {
+            int from=g_hud.preset==HUD_CUSTOM ? (step>0 ? HUD_FULL : HUD_OFF) : g_hud.preset;
+            ov_hud_select(&g_hud,hq_neighbor(from,step,HUD_CUSTOM));
+        } else if (row==HUD_POSITION_ROW) g_hud.position=hq_neighbor(g_hud.position,step,9);
+        else if (hud_slider_row()) hud_slide(.01*step,YES);
+        else return;
+        hud_save();
     }
+}
+static void hq_toggle_display(void) {
+    if (g_bg_fs_transition) return;
+    g_hq.phase=HQ_DISPLAYING;
+    g_ov_display_motion_blocked=1;
+    dm_motion_pro_active(0); hidpad_motion_clear();
+    dispatch_async(dispatch_get_main_queue(), ^{ [g_win toggleFullScreen:nil]; });
+}
+static void hq_display_finished(BOOL success) {
+    if (g_hq.phase!=HQ_DISPLAYING) return;
+    if (success) ov_fullscreen_save(g_hud_store,g_ov_game,(g_win.styleMask & NSWindowStyleMaskFullScreen)!=0);
+    hq_display_done(&g_hq);
+    hq_tick();
+    hq_poll();
+}
+static void hq_shoulder(int step) {
+    if (!step || g_hq.confirm) return;
+    g_hud_notice=nil;
+    if (g_hq.card==HQ_HUD) { hq_hud_page(&g_hq,!g_hq.advanced); return; }
+    if (g_hq.phase==HQ_QUICK) { hq_quick_neighbor(&g_hq,step); return; }
+    NSArray<NSNumber *> *tabs=ov_tabs(g_ov_social);
+    int i=(int)[tabs indexOfObject:@(g_hq.tab)];
+    g_hq.tab=tabs[hq_neighbor(i<0 ? 0 : i,step,(int)tabs.count)].intValue;
+    g_hq.selection=g_hq.row=0; g_hq.card=-1;
+}
+static void hq_swap_home(void) {
+    g_hq.swap=!g_hq.swap;
+    [g_hud_store setBool:g_hq.swap forKey:@"home-swap"];
 }
 static void hq_action(NSInteger action, NSInteger index) {
     hq_phase was = g_hq.phase;
@@ -842,16 +924,19 @@ static void hq_action(NSInteger action, NSInteger index) {
     case OV_BACK: hq_back(&g_hq); break;
     case OV_FULL: if (!g_hq.confirm) hq_open(&g_hq,HQ_FULL); break;
     case OV_TAB: if (!g_hq.confirm) { g_hq.tab=(int)index; g_hq.selection=0; g_hq.card=-1; g_hq.row=0; } break;
+    case OV_SHOULDER: hq_shoulder((int)index); break;
     case OV_CONFIRM:
         if (g_hq.confirm) { if (index == 1 && !g_hq.no_hold) g_hq.phase=HQ_QUIT; else hq_back(&g_hq); }
         break;
     case OV_MAIN:
         if (g_hq.confirm || index < 0 || index >= hq_count()) return;
-        g_hq.selection=(int)index; g_hq.row=0;
+        g_hq.selection=(int)index; hq_hud_page(&g_hq,0); g_hud_notice=nil;
         if (g_hq.tab==OV_PROFILE) g_hq.phase=HQ_PAUSED;
         else if (g_hq.tab==OV_FRIENDS) break;
         else if (was==HQ_QUICK || g_hq.tab==OV_SETTINGS) {
-            if (index==HQ_POWER) g_hq.confirm=1;
+            if (index==HQ_DISPLAY) { g_hq.card=-1; hq_toggle_display(); }
+            else if (g_hq.tab==OV_SETTINGS && index==HQ_HOME_SETTING) { g_hq.card=-1; hq_swap_home(); }
+            else if (index==HQ_POWER) { g_hq.card=-1; g_hq.confirm=1; }
             else g_hq.card=(int)index;
         } else if (!index) g_hq.phase=HQ_SETTLE;
         else if (index==1 && g_hq_arcane) g_hq.phase=HQ_PAUSED;
@@ -861,16 +946,21 @@ static void hq_action(NSInteger action, NSInteger index) {
         g_hq.row=(int)(index<0 ? -index-1 : index); hq_adjust(index<0 ? -1 : 1); break;
     case OV_VALUE: {
         int item=(int)(index<0 ? -index-1 : index);
-        if (g_hq.tab!=OV_SETTINGS || g_hq.card>=0 || item<0 || item>HQ_VOLUME) return;
+        if (g_hq.tab!=OV_SETTINGS || g_hq.card>=0 || item<0 || item>HQ_HOME_SETTING) return;
+        if (item>=HQ_DISPLAY) { hq_action(OV_MAIN,item); return; }
+        if (item>HQ_VOLUME) return;
         g_hq.selection=g_hq.card=item; g_hq.row=0;
         hq_adjust(index<0 ? -1 : 1); g_hq.card=-1;
         break;
     }
-    case OV_PRESET:
-        if (g_hq.card==HQ_HUD && index>=0 && index<4) {
-            g_hq.row=0; g_hud.preset=(int)index; ov_hud_save(g_hud_store,g_ov_game,g_hud); hud_apply();
-        }
-        break;
+    case OV_HUD_PAGE: hq_hud_page(&g_hq,(int)index); g_hud_notice=nil; break;
+    case OV_SCROLL:
+        if (g_hq.card!=HQ_HUD || !g_hq.advanced) return;
+        g_hq.row=hq_clamp(g_hq.row+(int)index,HUD_ADVANCED_COUNT-1); break;
+    case OV_SLIDE:
+        if (g_hq.card!=HQ_HUD || g_hq.advanced) return;
+        g_hq.row=(int)(index/10001); hud_slide((index%10001)/10000.0,NO); hud_apply(); return;
+    case OV_SLIDE_DONE: hud_save(); break;
     }
     hq_changed(was);
 }
@@ -880,19 +970,18 @@ static void hq_nav(unsigned nav) {
     if (nav&HQ_A) {
         if (g_hq.confirm) hq_action(OV_CONFIRM,g_hq.row);
         else if (g_hq.card < 0) hq_action(OV_MAIN,g_hq.selection);
-        else if (g_hq.card<=HQ_VOLUME) hq_action(OV_ROW,g_hq.row);
+        else if (g_hq.card==HQ_HUD && !g_hq.advanced && g_hq.row==HUD_ADVANCED_ROW) hq_action(OV_HUD_PAGE,1);
+        else if (g_hq.card<=HQ_VOLUME && !hud_slider_row()) hq_action(OV_ROW,g_hq.row);
         return;
     }
     if (g_hq.confirm) g_hq.row=hq_clamp(g_hq.row+horizontal+vertical,1);
-    else if (g_hq.phase==HQ_FULL && (nav&(HQ_L|HQ_R))) {
-        NSArray<NSNumber *> *tabs=ov_tabs(g_ov_social);
-        int i=(int)[tabs indexOfObject:@(g_hq.tab)]+!!(nav&HQ_R)-!!(nav&HQ_L);
-        hq_action(OV_TAB,tabs[hq_clamp(i,(int)tabs.count-1)].intValue); return;
-    }
+    else if (hq_shoulders(nav)) { hq_shoulder(hq_shoulders(nav)); }
     else if (g_hq.card>=0) {
-        if (g_hq.card==HQ_HUD && vertical) g_hq.row=hq_clamp(g_hq.row+vertical,4);
-        if (horizontal) hq_adjust(horizontal);
-    } else if (g_hq.tab==OV_SETTINGS && horizontal && !vertical && g_hq.selection<=HQ_VOLUME) {
+        if (g_hq.card==HQ_HUD && vertical) g_hq.row=hq_clamp(g_hq.row+vertical,g_hq.advanced ? HUD_ADVANCED_COUNT-1 : HUD_ADVANCED_ROW);
+        int trigger=!!(nav&HQ_ZR)-!!(nav&HQ_ZL);
+        if (hud_slider_row() && trigger) hq_adjust(10*trigger);
+        else if (horizontal && !(g_hq.card==HQ_HUD && g_hq.advanced)) hq_adjust(horizontal);
+    } else if (g_hq.tab==OV_SETTINGS && horizontal && !vertical && (g_hq.selection<=HQ_VOLUME || g_hq.selection>=HQ_DISPLAY)) {
         hq_action(OV_VALUE,horizontal>0 ? g_hq.selection : -g_hq.selection-1); return;
     } else if (hq_count()) g_hq.selection=hq_clamp(g_hq.selection+(g_hq.tab ? vertical : horizontal ? horizontal : vertical),hq_count()-1);
     hq_show();
@@ -903,7 +992,7 @@ static int hq_menu_key(unsigned short code, int down) {
     BOOL hot = code==g_ov_keys[0] || code==g_ov_keys[1];
     hq_phase was=g_hq.phase;
     if (down && hot) {
-        hq_key_open(&g_hq,code==g_ov_keys[0] ? HQ_QUICK : HQ_FULL);
+        hq_key_open(&g_hq,code==g_ov_keys[0] ? hq_long(&g_hq) : hq_short(&g_hq));
         if (was!=g_hq.phase) hq_changed(was);
     }
     else if (down && hq_visible(was)) switch (code) {
@@ -919,6 +1008,8 @@ static int hq_menu_key(unsigned short code, int down) {
 }
 static void hq_poll(void) {
     static int busy;
+    static unsigned held;
+    static double heldSince, repeatAt;
     if (g_hq.disabled || !g_win || !g_input_on || busy || cp_blocks_input(g_cp.phase)) return;
     busy = 1;
     int player, tap;
@@ -936,13 +1027,16 @@ static void hq_poll(void) {
             if (gen==g_hq_pulse_serial) { g_hq_pulse=-1; if (g_input_on && !hq_blocks_input(g_hq.phase)) pads_reread(); }
         });
     }
-    if (nav & (HQ_A|HQ_LEFT|HQ_RIGHT|HQ_UP|HQ_DOWN|HQ_L|HQ_R)) hq_nav(nav);
-    else if (was.phase!=g_hq.phase || was.card!=g_hq.card || was.confirm!=g_hq.confirm || was.tab!=g_hq.tab) hq_changed(was.phase);
+    unsigned dirs=hq_visible(g_hq.phase) && hud_slider_row() ? buttons & (HQ_LEFT|HQ_RIGHT) : 0;
+    int repeats=hq_slider_repeat(now,&heldSince,&repeatAt,&held,dirs);
+    if (nav & (HQ_A|HQ_LEFT|HQ_RIGHT|HQ_UP|HQ_DOWN|HQ_L|HQ_R|HQ_ZL|HQ_ZR)) hq_nav(nav);
+    else if (repeats && (dirs==HQ_LEFT || dirs==HQ_RIGHT)) { hq_adjust(dirs==HQ_LEFT ? -repeats : repeats); hq_show(); }
+    else if (was.phase!=g_hq.phase || was.card!=g_hq.card || was.confirm!=g_hq.confirm || was.tab!=g_hq.tab || was.advanced!=g_hq.advanced) hq_changed(was.phase);
     double fill = hq_ring(&g_hq, now);
     if (fill >= 0) {
         if (!g_hq_hold) {
             NSView *cv = g_win.contentView; CAShapeLayer *ring = nil;
-            g_hq_hold = hq_hold_view(cv.bounds, @(g_hq_text[HQ_TEXT_HOLD]), &ring);
+            g_hq_hold = hq_hold_view(cv.bounds,ov_text(g_ov_fr,g_hq.swap ? @"Keep holding for the full overlay" : @"Keep holding for quick access"),&ring);
             g_hq_ring = ring; ring.strokeColor = [g_ov_theme[@"focus"] CGColor];
             [cv addSubview:g_hq_hold];
         }
@@ -959,7 +1053,7 @@ static void hq_close(void) {
 
 // Launcher handoff from NX2Apple 0035 (see home_quit.h). Use the window's normal minimize/restore lifecycle, not a process or network suspend.
 enum { BG_PLAYING, BG_HIDING, BG_HIDDEN };
-static int g_bg, g_bg_fullscreen, g_bg_resume_pending, g_bg_fs_transition;
+static int g_bg, g_bg_fullscreen, g_bg_resume_pending;
 static unsigned g_bg_generation;   // a timeout from a previous pause must not hide a later session
 
 static void game_suspend(void) { input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }
@@ -1038,12 +1132,12 @@ static void bg_enter(void) {
     });
 }
 static void bg_start(void) {
-    if (!g_hq_arcane) return;
     NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
     for (NSNotificationName name in @[NSWindowWillEnterFullScreenNotification, NSWindowWillExitFullScreenNotification])
         [nc addObserverForName:name object:g_win queue:nil usingBlock:^(NSNotification *n) {
             g_bg_fs_transition = [n.name isEqualToString:NSWindowWillEnterFullScreenNotification] ? 1 : -1;
         }];
+    if (!g_hq_arcane) return;
     for (NSNotificationName name in @[NSApplicationDidBecomeActiveNotification, NSApplicationDidUnhideNotification])
         [nc addObserverForName:name object:NSApp queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
             (void)n;
@@ -1193,10 +1287,11 @@ static void (^g_fs_failed)(void);
 @implementation DmWinDelegate
 - (void)windowDidFailToEnterFullScreen:(NSWindow *)w {
     (void)w; g_bg_fs_transition = 0;
+    hq_display_finished(NO);
     if (g_bg == BG_HIDING) bg_exit_fullscreen();
     else if (g_fs_failed) g_fs_failed();
 }
-- (void)windowDidFailToExitFullScreen:(NSWindow *)w { (void)w; g_bg_fs_transition = 0; bg_hide(); bg_restore_fullscreen(); }
+- (void)windowDidFailToExitFullScreen:(NSWindow *)w { (void)w; g_bg_fs_transition = 0; hq_display_finished(NO); bg_hide(); bg_restore_fullscreen(); }
 @end
 
 typedef struct { void (*fn)(void); } guest_arg;
@@ -1211,7 +1306,13 @@ __attribute__((constructor)) static void hud_env(void) {
     front_hud_env();
     if (!hud_forced()) @autoreleasepool {   // the saved HUD choice (the overlay's card) turns it on unless it is Off
         NSUserDefaults *store = [[NSUserDefaults alloc] initWithSuiteName:@"org.nxnative.overlay"];
-        if (ov_hud_load(store,[@"game-" stringByAppendingString:@(DM_GAME_ID)]).preset) { setenv("DM_METAL_HUD","1",1); front_hud_env(); unsetenv("DM_METAL_HUD"); }
+        ov_hud hud=ov_hud_load(store,[@"game-" stringByAppendingString:@(DM_GAME_ID)]);
+        if (hud.enabled) {
+            setenv("MTL_HUD_ENABLED","1",0);
+            if (hud.preset==HUD_FPS) setenv("MTL_HUD_ELEMENTS","fps",1);
+            // Apple may reserve some instrumentation when creating the device.
+            setenv("MTL_HUD_ENCODER_TIMING_ENABLED",hud.options & 2u ? "1" : "0",1);
+        }
     }
     g_hud_live = getenv("MTL_HUD_ENABLED") && atoi(getenv("MTL_HUD_ENABLED"));
 }
@@ -2131,7 +2232,8 @@ void front_run(void (*guest)(void)) {
         NSApp.mainMenu = bar;
         static DmWinDelegate *wd; wd = [DmWinDelegate new]; win.delegate = wd;   // handle failed transitions even after entering fullscreen manually
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
-        if (fs && strcmp(fs, "0")) {
+        NSUserDefaults *overlayStore=[[NSUserDefaults alloc] initWithSuiteName:@"org.nxnative.overlay"];
+        if (ov_fullscreen_load(overlayStore,[@"game-" stringByAppendingString:@(DM_GAME_ID)],fs)) {
             // A game opened from a fullscreen app starts while macOS leaves that Space. Wait for activation and for the window to reach the active Space before asking for fullscreen
             // (whichever happens last), and repeat a refused startup request once. Only a request made here owns a retry; a later player request must never restart startup handling
             __block int want = 1, retried = 0, entering = 0;
@@ -2185,11 +2287,12 @@ void front_run(void (*guest)(void)) {
         // content view by itself; only the scale factor has to be carried over to the screen the window ended up on. The screen's rate is matched in fullscreen only (screen_match_apply)
         [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) {
             (void)n; screen_refresh(win.screen); g_fullscreen = 1; g_layer.contentsScale = win.backingScaleFactor; screen_match_apply();
-            g_bg_fs_transition = 0; if (g_bg == BG_HIDING) dispatch_async(dispatch_get_main_queue(), ^{ bg_exit_fullscreen(); });
+            g_bg_fs_transition = 0; hq_display_finished(YES);
+            if (g_bg == BG_HIDING) dispatch_async(dispatch_get_main_queue(), ^{ bg_exit_fullscreen(); });
         }];
         [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) {
             (void)n; g_fullscreen = 0; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply();
-            g_bg_fs_transition = 0; bg_hide();
+            g_bg_fs_transition = 0; hq_display_finished(YES); bg_hide();
             if (!g_bg && g_bg_fullscreen) dispatch_async(dispatch_get_main_queue(), ^{ bg_restore_fullscreen(); });   // an exit that finished after the timeout
         }];
         // DM_FOCUS_KEEP=1 (scripts/regress.py): the game stays in focus while its window is up, whichever app is active. Tears of the Kingdom stops presenting out of focus, so

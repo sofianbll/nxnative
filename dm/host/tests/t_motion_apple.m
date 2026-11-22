@@ -53,6 +53,15 @@ int main(void) { @autoreleasepool {
     assert(samples == 1 && player == 1 && rot[1] == 0.001f);
     dm_motion_detach((id)c, 1);
     assert(!m.sensorsActive && !m.valueChangedHandler && cleared == 1);
+    _Atomic int blocked=1;
+    dm_motion_attach_gated((id)c,1,&blocked);
+    m.valueChangedHandler((id)m);
+    m.rotationRate=(GCRotationRate){1,0,0}; m.valueChangedHandler((id)m);
+    assert(samples==1);
+    blocked=0; m.valueChangedHandler((id)m);
+    m.rotationRate=(GCRotationRate){0,1,0}; m.valueChangedHandler((id)m);
+    assert(samples==2 && rot[1]==1);
+    dm_motion_detach((id)c,1);
     puts("t_motion_apple: passed");
     return 0;
 } }

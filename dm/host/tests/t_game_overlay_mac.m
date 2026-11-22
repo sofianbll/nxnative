@@ -22,27 +22,52 @@ static void settings(void) {
     NSString *domain = [@"org.nxnative.overlay.test." stringByAppendingString:NSUUID.UUID.UUIDString];
     NSUserDefaults *store = [[NSUserDefaults alloc] initWithSuiteName:domain];
     ov_hud hud = ov_hud_load(store,@"game-a");
-    assert(hud.preset == 1 && hud.local && hud.position == 1 && hud.size == 0 && hud.opacity == 2);
-    hud = (ov_hud){3,2,1,4,YES}; ov_hud_save(store,@"game-a",hud);
-    assert(ov_hud_load(store,@"game-b").preset == 1);
+    assert(hud.preset == HUD_FPS && hud.local && hud.position == 2 && hud.scale == .2 && hud.opacity == .5);
+    NSString *original=@"MTL_HUD_HIDE_METALFX_METRICS=1 MTL_HUD_OPACITY=0.5 MTL_HUD_ENABLED=1 MTL_HUD_ALIGNMENT=12 MTL_HUD_ELEMENTS=device,rosetta,layersize,memory,fps,frameinterval,frameintervalhistogram,metalcpu,gputimeline,shaders,framenumber,frameintervalgraph,presentdelay,gputime,thermal,layerscale,refreshrate,gamemode,edrheadroom,client";
+    NSUInteger ignored;
+    assert(ov_hud_import(original,&hud,&ignored) && !ignored);
+    assert(hud.preset==HUD_CUSTOM && hud.elements==0x89c79aff && hud.options==(1u<<6) && hud.enabled && hud.position==2 && hud.opacity==.5);
+    assert(ov_hud_import(@"MTL_HUD_SCALE=.3234 MTL_HUD_FUTURE=1 MTL_HUD_OPACITY=nan",&hud,&ignored) && ignored==2);
+    assert(!ov_hud_import(@"MTL_HUD_CONFIG_FILE=/tmp/untrusted",&hud,&ignored) && ignored==1);
+    assert(!ov_hud_import(@"not a config",&hud,&ignored) && !ignored);
+    assert(hud.scale==.3234 && hud.opacity==.5);
+    ov_hud copy=ov_hud_default;
+    assert(ov_hud_import(ov_hud_export(hud),&copy,&ignored) && !ignored && [ov_hud_config(copy) isEqual:ov_hud_config(hud)]);
+    NSData *plist=[NSPropertyListSerialization dataWithPropertyList:ov_hud_config(hud) format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
+    assert(ov_hud_import([[NSString alloc] initWithData:plist encoding:NSUTF8StringEncoding],&copy,&ignored) &&
+        !ignored && [ov_hud_config(copy) isEqual:ov_hud_config(hud)]);
+    ov_hud_save(store,@"game-a",hud);
+    assert(ov_hud_load(store,@"game-b").preset == HUD_FPS);
     store = [[NSUserDefaults alloc] initWithSuiteName:domain];
     hud = ov_hud_load(store,@"game-a");
-    assert(hud.preset == 3 && hud.position == 2 && hud.size == 1 && hud.opacity == 4 && hud.local);
+    assert(hud.preset==HUD_CUSTOM && hud.local && [ov_hud_config(copy) isEqual:ov_hud_config(hud)]);
     hud.local = NO; ov_hud_save(store,@"game-a",hud);
-    assert(![store objectForKey:@"game-a"] && ov_hud_load(store,@"game-b").preset == 3 && !ov_hud_load(store,@"game-b").local);
+    assert(![store objectForKey:@"game-a"] && ov_hud_load(store,@"game-b").preset == HUD_CUSTOM && !ov_hud_load(store,@"game-b").local);
+    [store setObject:@[@3,@2,@1,@4] forKey:@"game-a"];
+    hud=ov_hud_load(store,@"game-a"); assert(hud.preset==HUD_FULL && hud.position==6 && fabs(hud.scale-.3)<1e-9 && hud.opacity==1);
     [store setObject:@[@3,@2,@1,@"bad"] forKey:@"game-a"];
-    assert(ov_hud_load(store,@"game-a").preset == 1);
+    assert(ov_hud_load(store,@"game-a").preset == HUD_FPS);
+    assert(!ov_fullscreen_load(store,@"game-a",NULL) && ov_fullscreen_load(store,@"game-a","1"));
+    ov_fullscreen_save(store,@"game-a",YES);
+    assert(ov_fullscreen_load(store,@"game-a","0") && !ov_fullscreen_load(store,@"game-b","0"));
+    ov_fullscreen_save(store,@"game-a",NO);
+    assert(!ov_fullscreen_load(store,@"game-a","1"));
+    assert(!ov_home_swap_load(store,NULL) && ov_home_swap_load(store,"1"));
+    [store setBool:YES forKey:@"home-swap"];
+    assert(ov_home_swap_load(store,NULL) && !ov_home_swap_load(store,"0"));
     [store removePersistentDomainForName:domain];
-    // preset -> Metal's HUD properties (numbers as NSNumbers, every key sent each time, Off only disables)
-    NSDictionary *off = @{@"mode":@"disabled"};
-    assert([ov_hud_properties((ov_hud){0,1,0,2,YES}) isEqual:off]);
-    NSDictionary *fpsHud = @{@"mode":@"default", @"MTL_HUD_ELEMENTS":@"fps", @"MTL_HUD_ALIGNMENT":@"topright", @"MTL_HUD_SCALE":@.2, @"MTL_HUD_OPACITY":@.5};
-    assert([ov_hud_properties(ov_hud_default) isEqual:fpsHud]);
-    NSDictionary *std = ov_hud_properties((ov_hud){2,2,1,4,YES}), *all = ov_hud_properties((ov_hud){3,0,2,0,YES});
-    assert([std[@"MTL_HUD_ELEMENTS"] isEqual:@"fps,frameinterval,gputime"] && [std[@"MTL_HUD_ALIGNMENT"] isEqual:@"bottomleft"]);
-    assert([std[@"MTL_HUD_SCALE"] isEqual:@.3] && [std[@"MTL_HUD_OPACITY"] isEqual:@1.0]);
-    assert([[all[@"MTL_HUD_ELEMENTS"] componentsSeparatedByString:@","] count] == 20 && [all[@"MTL_HUD_ALIGNMENT"] isEqual:@"topleft"]);
-    assert([all[@"MTL_HUD_SCALE"] isEqual:@.4] && [all[@"MTL_HUD_OPACITY"] isEqual:@.25]);
+    NSArray *native=@[@"",@"fps",@"device,rosetta,layersize,memory,fps,frameinterval,frameintervalgraph,gputime,gamemode,client",
+        @"device,rosetta,layersize,memory,fps,frameinterval,metalcpu,shaders,frameintervalgraph,presentdelay,gputime,thermal,gamemode,client",
+        @"device,rosetta,layersize,memory,fps,frameinterval,frameintervalhistogram,metalcpu,gputimeline,shaders,framenumber,frameintervalgraph,presentdelay,gputime,thermal,layerscale,refreshrate,gamemode,client"];
+    for (int i=0;i<HUD_CUSTOM;i++) {
+        hud=ov_hud_default; hud.options=2; ov_hud_select(&hud,i);
+        NSDictionary *d=ov_hud_properties(hud);
+        if (i==HUD_OFF) { assert([d isEqual:@{@"mode":@"disabled"}] && !hud.elements); continue; }
+        assert([[NSSet setWithArray:[d[@"MTL_HUD_ELEMENTS"] componentsSeparatedByString:@","]] isEqual:
+                [NSSet setWithArray:[native[i] componentsSeparatedByString:@","]]]);
+        assert([d[@"mode"] isEqual:i==HUD_OFF ? @"disabled" : @"default"] && [d[@"MTL_HUD_ALIGNMENT"] isEqual:@12]);
+        if (i==HUD_FPS) assert([d[@"MTL_HUD_ENCODER_TIMING_ENABLED"] isEqual:@0]);
+    }
     // DM_METAL_HUD still enables Metal's HUD at launch; 0 leaves it to the saved choice
     unsetenv("MTL_HUD_ENABLED"); setenv("DM_METAL_HUD","0",1); front_hud_env(); assert(!getenv("MTL_HUD_ENABLED"));
     setenv("DM_METAL_HUD","1",1); front_hud_env(); assert(!strcmp(getenv("MTL_HUD_ENABLED"),"1"));
@@ -78,7 +103,8 @@ static void capture(NSString *out, NSString *name, NSRect bounds, NSImage *pictu
         [stage addSubview:overlay];
     }
     [stage layoutSubtreeIfNeeded]; [stage displayIfNeeded];
-    NSBitmapImageRep *rep = [stage bitmapImageRepForCachingDisplayInRect:bounds];
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:NSWidth(bounds) pixelsHigh:NSHeight(bounds)
+        bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
     assert(rep.pixelsWide == 1600 && rep.pixelsHigh == 900);
     [stage cacheDisplayInRect:bounds toBitmapImageRep:rep];
     NSString *path = [out stringByAppendingPathComponent:[name stringByAppendingString:@".png"]];
@@ -89,24 +115,28 @@ static void screens(NSString *out, NSString *assets, NSRect bounds, NSDictionary
     NSImage *picture = backdrop(assets,NO), *blurred = backdrop(assets,YES);
     NSDictionary *theme = ov_theme(nil);
     void (^unused)(NSInteger,NSInteger) = ^(NSInteger a,NSInteger i) { (void)a; (void)i; };
-    NSArray *quickNames = @[@"overlay-quick",@"overlay-quick-volume",@"overlay-quick-controllers",@"overlay-quick-multiplayer",
-        @"overlay-quick-quit",@"overlay-quick-hud-standard",@"overlay-quick-hud-full",@"overlay-quick-home-help"];
-    for (NSUInteger i=0; i<quickNames.count; i++) {
+    NSArray *quickNames = @[@"overlay-quick-hud",@"overlay-quick-volume",@"overlay-quick-controllers",@"overlay-quick-multiplayer",
+        @"overlay-quick-display-windowed",@"overlay-quick-quit",@"overlay-quick-display-fullscreen",@"overlay-quick-hud-advanced",
+        @"overlay-quick-hud-slider",@"overlay-quick-hud-pasted",@"overlay-quick-home-help"];
+    for (int i=0; i<(int)quickNames.count; i++) {
         home_quit q = {0}; hq_open(&q,HQ_QUICK);
-        q.selection = i<=HQ_POWER ? (int)i : HQ_HUD;
-        if (i<7) q.card = q.selection;
+        q.selection = i<=HQ_POWER ? i : i==6 ? HQ_DISPLAY : HQ_HUD;
+        if (q.selection<HQ_DISPLAY && i!=10) q.card = q.selection;
         q.confirm = i==HQ_POWER;
-        int preset = i==5 ? 2 : i==6 ? 3 : 1;
         NSMutableDictionary *d = [sample mutableCopy];
-        d[@"preset"] = @(preset); d[@"size"] = ov_text(YES,@"Small"); d[@"opacity"] = @"50 %"; d[@"hudLater"] = @(i==5);
-        if (i==7) d[@"homeHelp"] = ov_home_help(YES,YES);
+        d[@"fullscreen"]=@(i==6);
+        if (i==7 || i==9) { q.advanced=1; q.row=i==9 ? HUD_PASTE : HUD_FIRST_OPTION+1; }
+        if (i==8) { q.row=HUD_OPACITY_ROW; d[@"opacity"]=@.63; d[@"shoulders"]=@[@"L",@"R",@"ZL",@"ZR"]; }
+        if (i==9) { d[@"preset"]=@(HUD_CUSTOM); d[@"hudNotice"]=@"Configuration collée · Ignorés : 1"; }
+        if (i==10) d[@"homeHelp"] = ov_home_help(YES,YES);
         capture(out,quickNames[i],bounds,picture,ov_view(bounds,q,d,theme,unused));
     }
     NSArray *fullNames = @[@"overlay-full",@"overlay-full-settings",@"overlay-full-profile",@"overlay-full-friends",@"overlay-full-achievements",
-        @"overlay-full-standalone"];
+        @"overlay-full-standalone",@"overlay-full-home-reversed"];
     for (NSUInteger i=0; i<fullNames.count; i++) {
         home_quit q = {0}; hq_open(&q,HQ_FULL); q.tab = i<OV_TAB_COUNT ? (int)i : OV_SESSION;
         NSMutableDictionary *d = [sample mutableCopy]; d[@"background"] = blurred;
+        if (i==OV_TAB_COUNT+1) { q.tab=OV_SETTINGS; q.selection=HQ_HOME_SETTING; q.swap=1; }
         if (i==OV_TAB_COUNT) {
             [d removeObjectsForKeys:@[@"cover",@"total",@"social"]];
             d[@"actions"] = @[@"Reprendre",@"Quitter"];
@@ -158,11 +188,11 @@ int main(void) {
             @"controllerRows":@[@{@"player":@1,@"name":@"Nintendo Switch Pro Controller"},@{@"player":@2,@"name":@"DualSense Wireless Controller"}],
             @"ldn":@"Salon LDN actif", @"ldnActive":@YES, @"volume":@"65 %",
             @"clock":@"21:42", @"canQuit":@YES, @"actions":@[@"Reprendre",@"Retour à Arcane",@"Quitter"],
-            @"preset":@1, @"position":@"En haut à droite", @"size":@"Petit", @"opacity":@"50 %", @"scope":@"Pour ce jeu",
+            @"preset":@1, @"position":@2, @"scale":@.2, @"opacity":@.5, @"scope":@"Pour ce jeu", @"hudEnabled":@YES, @"hudElements":@0x10,
             @"quitTitle":@"Quitter Pokémon Legends: Z-A ?", @"social":social, @"canArcane":@YES} mutableCopy];
         for (int full=0; full<2; full++) {
             home_quit q = {0}; hq_open(&q,full ? HQ_FULL : HQ_QUICK);
-            if (!full) q.card = HQ_HUD;
+            if (!full) { q.card = HQ_HUD; q.row=HUD_ADVANCED_ROW; }
             __block NSInteger action = -1, index = -1;
             NSView *view = ov_view(bounds,q,d,ov_theme(nil),^(NSInteger a,NSInteger i) { action=a; index=i; });
             assert(view.isAccessibilityElement && view.subviews.count > 15);
@@ -170,11 +200,11 @@ int main(void) {
             for (NSView *child in view.subviews) if ([child isKindOfClass:NSButton.class]) {
                 NSButton *button = (NSButton *)child;
                 assert(button.accessibilityLabel.length && NSContainsRect(bounds,child.frame));
-                if ([button.accessibilityLabel isEqualToString:full ? @"Reprendre" : @"FPS"] && button.accessibilitySelected) {
+                if ([button.accessibilityLabel isEqualToString:full ? @"Reprendre" : @"Avancé"] && button.accessibilitySelected) {
                     [button performClick:nil]; chosen++;
                 }
             }
-            assert(chosen == 1 && action == (full ? OV_MAIN : OV_PRESET) && index == (full ? 0 : 1));
+            assert(chosen == 1 && action == (full ? OV_MAIN : OV_HUD_PAGE) && index == (full ? 0 : 1));
             q.confirm = 1; q.row = 0;
             view = ov_view(bounds,q,d,ov_theme(nil),^(NSInteger a,NSInteger i) { action=a; index=i; });
             chosen = 0;
@@ -193,6 +223,25 @@ int main(void) {
             if ([child.accessibilityLabel isEqual:@"Augmenter — HUD"]) [(NSButton *)child performClick:nil];
         }
         assert(used==OV_VALUE && row==HQ_HUD);
+        home_quit sliderState={0}; hq_open(&sliderState,HQ_QUICK); sliderState.card=HQ_HUD; sliderState.row=HUD_OPACITY_ROW;
+        NSView *sliderView=ov_view(bounds,sliderState,d,ov_theme(nil),picked);
+        for (NSView *child in sliderView.subviews) if ([child isKindOfClass:DmHudSlider.class] && [child.accessibilityLabel isEqual:@"Opacité"]) {
+            DmHudSlider *slider=(DmHudSlider *)child;
+            slider.doubleValue=.6312;
+            slider.trackingMouse=YES;
+            [slider sendAction:slider.action to:slider.target];
+            assert([slider.valueLabel.stringValue isEqual:@"63 %"]);
+        }
+        assert(used==OV_SLIDE && row==HUD_OPACITY_ROW*10001+6312);
+        for (int mode=0;mode<2;mode++) {
+            home_quit q={0}; hq_open(&q,HQ_QUICK); q.selection=HQ_DISPLAY;
+            d[@"fullscreen"]=@(mode);
+            NSView *view=ov_view(bounds,q,d,ov_theme(nil),picked);
+            for (NSView *child in view.subviews)
+                if ([child.accessibilityLabel isEqual:mode ? @"Fenêtre" : @"Plein écran"]) [(NSButton *)child performClick:nil];
+            assert(used==OV_MAIN && row==HQ_DISPLAY);
+            used=-1;
+        }
         full.tab=OV_PROFILE;
         NSView *profile=ov_view(bounds,full,d,ov_theme(nil),picked);
         for (NSView *child in profile.subviews)

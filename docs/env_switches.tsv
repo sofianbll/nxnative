@@ -58,7 +58,7 @@ DM_FS	diagnostic	When set, logs file opens, paths not found or not mounted, and 
 DM_FSLOG	diagnostic	`=<file>` writes one TSV line per ReadFile: seconds since boot, guest path, offset, length and guest buffer address
 DM_FSLOG_HASH	diagnostic	With `DM_FSLOG`, adds a column with the FNV-1a 64 hash of the bytes read
 DM_FSTEP_PROBE_RAMP	switch	`0` ends a frame-step probe's grace after its 30 frames as before; by default the grace is renewed while the probe's frames keep getting cheaper (macOS raises the GPU clock for the shorter deadline over seconds); `ab` alternates with `DM_AB`
-DM_FULLSCREEN	player	`1` (any value but `0`) starts the Mac window in fullscreen; `0` or unset, a window. The Mac settings window's Display mode
+DM_FULLSCREEN	player	`1` (any value but `0`) starts the Mac window in fullscreen; `0` or unset, a window. The in-game overlay's saved Display choice for this game takes precedence
 DM_FX_DIRECT	switch	With `DM_PRESENT_UPSCALE=metalfx`, `0` keeps the present pass after MetalFX's spatial scaler; by default the scaler writes the drawable itself when the picture fills it unflipped and the drawable takes the scaler's output (iOS)
 DM_FX_INPLACE	switch	With `DM_PRESENT_UPSCALE=metalfx`, `0` keeps the copy into MetalFX's input; by default the scaler reads the presented texture itself when the picture is all of it
 DM_GAME	switch	Selects the game profile (a title ID under `dm/games` or `DM_GAMES_DIR`) for the Python tools and the rewriter; there is no default
@@ -95,7 +95,7 @@ DM_HITCH_DUMP	diagnostic	`=<ms>[:<s>]`: when no frame has been presented for tha
 DM_HLECOUNT	diagnostic	`=<file>` (`%d` = process ID) writes at exit a TSV of how many times the guest called each HLE function, zero counts included
 DM_HOME_MENU	player	`0` disables both Mac in-game overlays and leaves the controller's Menu button to the game
 DM_HOME_MENU_LAUNCHER	switch	`1` offers Return to Arcane in the full Mac overlay and enables the launcher handoff notifications ([Mac Home menu and background pause](frontends.md#mac-home-menu-and-background-pause))
-DM_HOME_QUIT	player	`0` disables holding Home or Menu for Quick access and hides Quit from the Mac overlays; short Home and the keyboard shortcuts remain available
+DM_HOME_QUIT	player	`0` disables holding Home or Menu to open an overlay and hides Quit; short Home and the keyboard shortcuts remain available
 DM_HOME_QUIT_CAPTURE	test	`=<folder>`: `tests/t_home_quit_mac.m` draws the legacy card layout, controller applet prompt and hold indicator into PNG files
 DM_HOME_QUIT_TEXT	switch	Localizes Mac overlay lines 2–8: confirmation title, warning, Quit, Cancel, Resume, launcher return and game title. Line 1 (old hold instruction) is ignored; empty lines keep their default
 DM_HTML	path	Folder of the offline HTML pages (default: `html` beside the RomFS)
@@ -324,7 +324,8 @@ DM_OPENSSL_ROOT	path	Reviewed static OpenSSL prefix for optional online/BCAT hel
 DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
 DM_OVERLAY_COVER	path	Optional absolute path to local cover art for the full Mac overlay (regular image file, at most 16 MiB)
 DM_OVERLAY_DATA	path	Launch-only absolute path to a read-only JSON snapshot for Profile, Friends and Achievements (see [Mac overlay](frontends.md#overlay-data)); absent tabs are hidden
-DM_OVERLAY_KEYS	player	Mac Quick access and full overlay keys, two distinct F1–F12 names separated by a comma (default `F9,F10`), or `0` to disable
+DM_OVERLAY_HOME_SWAP	player	Mac overlay at launch: `1` makes short Home open Quick access and long Home/Menu open the full overlay; `0` restores the default. When present it wins over the saved overlay preference at launch; otherwise that preference is used. The in-game setting can change it immediately in either case
+DM_OVERLAY_KEYS	player	Mac long-gesture and short-gesture equivalents respectively: two distinct F1–F12 names separated by a comma (default `F9,F10`), or `0` to disable. Their destinations follow `DM_OVERLAY_HOME_SWAP`
 DM_OVERLAY_PLAY_TIME	switch	Optional preformatted lifetime play time for the full Mac overlay
 DM_OVERLAY_TEST_ASSETS	test	`=<folder>` of stand-in images `bg.jpg` and `cover.png` read by the offline AppKit overlay PNG test
 DM_OVERLAY_TEST_SCREENS	test	`=<folder>` for `tests/t_game_overlay_mac.m` to write 1600×900 PNGs of Quick access cards and full overlay tabs over a synthetic backdrop (also set `DM_OVERLAY_TEST_ASSETS`)

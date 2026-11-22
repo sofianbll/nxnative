@@ -65,7 +65,7 @@ With [Press a button to join](settings.md#press-a-button-to-join) on in the sett
 
 Tap Home for the full overlay, or hold Home or Menu (+ / Options) for half a second for Quick access. If macOS keeps Home for itself, use F9/F10 or [free the Home button in System Settings](frontends.md#free-the-home-button-for-the-overlay). Use the D-pad or left stick to move, A to choose, and B to go back. To quit, choose **Quit** and confirm; **Cancel** is selected first. As with ⌘Q, any unsaved progress is lost.
 
-The game keeps running while the overlay is open; local pads do not feed the game until it closes. **Return to Arcane** (when [enabled by the launcher](frontends.md#mac-home-menu-and-background-pause)) suspends sound and rendering, but an online session can time out. Quick access also adjusts Apple's performance HUD and the volume without restarting.
+The game keeps running while the overlay is open; local pads do not feed the game until it closes. **Return to Arcane** (when [enabled by the launcher](frontends.md#mac-home-menu-and-background-pause)) suspends sound and rendering, but an online session can time out. Quick access also changes the display mode, volume and Apple performance HUD. Use **Game settings → Home Button** to reverse the short and long gestures.
 
 ### Switch 2 controllers (Mac)
 

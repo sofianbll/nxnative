@@ -5,22 +5,32 @@
 #import "home_quit_mac.h"
 #import <ImageIO/ImageIO.h>
 
-enum { OV_MAIN, OV_TAB, OV_ROW, OV_BACK, OV_FULL, OV_CONFIRM, OV_PRESET, OV_VALUE };
+enum { OV_MAIN, OV_TAB, OV_ROW, OV_BACK, OV_FULL, OV_CONFIRM, OV_VALUE, OV_HUD_PAGE, OV_SLIDE, OV_SLIDE_DONE, OV_SCROLL, OV_SHOULDER };
 enum { OV_SESSION, OV_SETTINGS, OV_PROFILE, OV_FRIENDS, OV_ACHIEVEMENTS, OV_TAB_COUNT };
 
 static NSString *ov_text(BOOL fr, NSString *en) {
     if (!fr) return en;
     return @{
-        @"Keep holding for quick access":@"Maintenir pour l’accès rapide", @"Cancel":@"Annuler", @"Resume":@"Reprendre",
+        @"Keep holding for quick access":@"Maintenir pour l’accès rapide", @"Keep holding for the full overlay":@"Maintenir pour l’overlay complet",
+        @"Cancel":@"Annuler", @"Resume":@"Reprendre",
         @"Quit":@"Quitter", @"Return to Arcane":@"Retour à Arcane", @"Unsaved progress will be lost.":@"La progression non sauvegardée sera perdue.",
         @"Session":@"Session", @"Game settings":@"Réglages du jeu", @"Quick access":@"Accès rapide", @"Profile":@"Profil", @"Friends":@"Amis", @"Achievements":@"Succès",
         @"Choose":@"Choisir", @"Back":@"Retour", @"Full overlay":@"Overlay complet",
         @"Game running":@"Jeu en cours", @"The game continues while the overlay is open.":@"Le jeu continue pendant que l’overlay est ouvert.",
         @"Play time":@"Temps de jeu", @"Controllers":@"Manettes", @"Game volume":@"Volume du jeu", @"Multiplayer":@"Jouer à plusieurs",
-        @"Performance HUD":@"HUD de performance", @"Off":@"Désactivé", @"Full":@"Complet", @"At next launch":@"Au prochain lancement",
-        @"Position":@"Position", @"Size":@"Taille", @"Opacity":@"Opacité", @"For this game":@"Pour ce jeu", @"For all games":@"Partout",
+        @"Performance HUD":@"HUD de performance", @"Off":@"Désactivé", @"Custom":@"Personnalisé", @"At next launch":@"Au prochain lancement",
+        @"Position":@"Position", @"Size":@"Taille", @"Opacity":@"Opacité", @"For this game":@"Pour ce jeu", @"For all games":@"Pour tous les jeux",
         @"Top left":@"En haut à gauche", @"Top right":@"En haut à droite", @"Bottom left":@"En bas à gauche", @"Bottom right":@"En bas à droite",
-        @"Small":@"Petit", @"Medium":@"Moyen", @"Large":@"Grand", @"No controllers connected":@"Aucune manette connectée",
+        @"Top center":@"En haut au centre", @"Center left":@"Au milieu à gauche", @"Centered":@"Au centre",
+        @"Center right":@"Au milieu à droite", @"Bottom center":@"En bas au centre", @"No controllers connected":@"Aucune manette connectée",
+        @"Preset":@"Préréglage", @"Advanced":@"Avancé", @"General":@"Général", @"Scope":@"Portée", @"Enable HUD":@"Activer le HUD",
+        @"Paste HUD configuration":@"Coller une configuration HUD", @"Copy configuration":@"Copier la configuration",
+        @"Configuration pasted":@"Configuration collée", @"Configuration copied":@"Configuration copiée",
+        @"No valid HUD configuration":@"Aucune configuration HUD valide", @"Ignored: %lu":@"Ignorés : %lu",
+        @"May increase CPU cost":@"Peut augmenter le coût CPU", @"Tabs":@"Onglets", @"Cards":@"Cartes", @"Large step":@"Grand pas",
+        @"Display":@"Affichage", @"Fullscreen":@"Plein écran", @"Window":@"Fenêtre", @"Home Button":@"Bouton Home",
+        @"Short = full overlay":@"Court = overlay complet", @"Short = quick access":@"Court = accès rapide",
+        @"Hold = full overlay":@"Long = overlay complet", @"Hold = quick access":@"Long = accès rapide",
         @"VPN connected":@"VPN connecté", @"VPN not detected":@"VPN non détecté", @"ZeroTier connected":@"ZeroTier connecté",
         @"Signed in":@"Compte connecté", @"Not signed in":@"Aucun compte connecté", @"LDN enabled":@"LDN activé", @"LDN disabled":@"LDN désactivé",
         @"LDN room active":@"Salon LDN actif", @"VPN not configured":@"VPN non configuré",
@@ -47,6 +57,37 @@ static NSString *ov_home_help(BOOL fr, BOOL overrides) {
 @property (strong) NSDictionary *palette;
 @property (strong) NSImage *backdrop;
 @property BOOL quick;
+@property BOOL hudAdvanced;
+@end
+@interface DmHudSlider : NSSlider
+@property (weak) NSTextField *valueLabel;
+@property BOOL trackingMouse;
+@end
+@implementation DmHudSlider
+- (void)mouseDown:(NSEvent *)event {
+    self.trackingMouse=YES;
+    [super mouseDown:event];
+    self.trackingMouse=NO;
+    [(DmOverlay *)self.target choose](OV_SLIDE_DONE,0);
+}
+@end
+@interface DmHudSliderCell : NSSliderCell
+@property (strong) NSColor *ink, *fill;
+@end
+@implementation DmHudSliderCell
+- (void)drawBarInside:(NSRect)r flipped:(BOOL)flipped {
+    (void)flipped;
+    CGFloat h=NSHeight(r)*.40; r=NSInsetRect(r,0,(NSHeight(r)-h)/2);
+    [[self.ink colorWithAlphaComponent:.28] setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:r xRadius:h/2 yRadius:h/2] fill];
+    r.size.width *= (self.doubleValue-self.minValue)/(self.maxValue-self.minValue);
+    [self.fill setFill]; [[NSBezierPath bezierPathWithRoundedRect:r xRadius:h/2 yRadius:h/2] fill];
+}
+- (void)drawKnob:(NSRect)r {
+    CGFloat side=MIN(NSWidth(r),NSHeight(r))*.82;
+    NSRect dot=NSMakeRect(NSMidX(r)-side/2,NSMidY(r)-side/2,side,side);
+    [self.fill setFill]; [[NSBezierPath bezierPathWithOvalInRect:dot] fill];
+}
 @end
 @implementation DmOverlay
 - (BOOL)isFlipped { return YES; }
@@ -63,6 +104,15 @@ static NSString *ov_home_help(BOOL fr, BOOL overrides) {
     [g drawFromPoint:NSZeroPoint toPoint:NSMakePoint(0, NSHeight(self.bounds)) options:0];
 }
 - (void)activate:(NSButton *)sender { self.choose(sender.tag / 256, sender.tag % 256 - 8); }
+- (void)slide:(DmHudSlider *)slider {
+    slider.valueLabel.stringValue=[NSString stringWithFormat:@"%.0f %%",slider.doubleValue*100];
+    self.choose(OV_SLIDE,slider.tag*10001+lround(slider.doubleValue*10000));
+    if (!slider.trackingMouse) self.choose(OV_SLIDE_DONE,0);
+}
+- (void)scrollWheel:(NSEvent *)event {
+    if (self.hudAdvanced && fabs(event.scrollingDeltaY) >= 1) self.choose(OV_SCROLL,event.scrollingDeltaY > 0 ? -1 : 1);
+    else [super scrollWheel:event];
+}
 @end
 
 typedef struct { CGFloat k, w, h; } ov_layout;
@@ -98,10 +148,23 @@ static NSButton *ov_button(DmOverlay *v, NSRect frame, NSString *text, NSString 
 }
 
 static NSArray *ov_items(BOOL fr) {
-    return @[@"HUD", ov_text(fr, @"Game volume"), ov_text(fr, @"Controllers"), ov_text(fr, @"Multiplayer"), ov_text(fr, @"Quit")];
+    return @[@"HUD", ov_text(fr, @"Game volume"), ov_text(fr, @"Controllers"), ov_text(fr, @"Multiplayer"), ov_text(fr, @"Display"), ov_text(fr, @"Quit")];
 }
 static NSArray *ov_presets(BOOL fr) {
-    return @[ov_text(fr, @"Off"), @"FPS", @"Standard", ov_text(fr, @"Full")];
+    return @[ov_text(fr, @"Off"), @"FPS Only", @"Default", @"Rich", @"Full", ov_text(fr, @"Custom")];
+}
+static NSString *ov_hud_position(BOOL fr, int pos) {
+    return ov_text(fr,(@[@"Top left",@"Top center",@"Top right",@"Center left",@"Centered",@"Center right",@"Bottom left",@"Bottom center",@"Bottom right"])[pos]);
+}
+static NSString *ov_hud_advanced_label(BOOL fr, int row) {
+    if (row<HUD_FIRST_OPTION) return ov_text(fr,(@[@"Scope",@"Paste HUD configuration",@"Copy configuration",@"Enable HUD"])[row]);
+    if (row<HUD_FIRST_METRIC) {
+        int i=row-HUD_FIRST_OPTION; return @(fr ? ov_hud_options[i].fr : ov_hud_options[i].en);
+    }
+    int i=row-HUD_FIRST_METRIC; return @(fr ? ov_hud_metrics[i].fr : ov_hud_metrics[i].en);
+}
+static NSArray *ov_shoulders(NSDictionary *d) {
+    return d[@"shoulders"] ?: @[@"LB",@"RB",@"LT",@"RT"];
 }
 static NSArray<NSNumber *> *ov_tabs(NSDictionary *social) {
     NSMutableArray *tabs = [NSMutableArray arrayWithObject:@(OV_SESSION)];
@@ -185,7 +248,7 @@ static void ov_avatar(NSView *v, NSRect frame, NSDictionary *person, NSColor *su
 static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary *theme, void (^choose)(NSInteger, NSInteger)) {
     BOOL fr = [d[@"fr"] boolValue], quick = q.phase == HQ_QUICK;
     DmOverlay *v = [[DmOverlay alloc] initWithFrame:bounds];
-    v.choose = choose; v.palette = theme; v.quick = quick; v.backdrop = d[@"background"];
+    v.choose = choose; v.palette = theme; v.quick = quick; v.backdrop = d[@"background"]; v.hudAdvanced=q.card==HQ_HUD && q.advanced;
     v.accessibilityElement = YES; v.accessibilityRole = NSAccessibilityGroupRole;
     v.accessibilityLabel = ov_text(fr, quick ? @"Quick access" : @"Full overlay");
     CGFloat k = MAX(.01, MIN(NSWidth(bounds) / 1920, NSHeight(bounds) / 1080));
@@ -201,15 +264,20 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
 #define L(x,y,w,h,text,size,weight,color) ov_label(v,R(x,y,w,h),text,TYPE(size)*k,weight,color,NSTextAlignmentLeft)
 #define T(s) ov_text(fr, s)
     NSString *quit = d[@"quitLabel"] ?: T(@"Quit"), *resume = d[@"resume"] ?: T(@"Resume");
-    NSArray *items = ov_items(fr), *symbols = @[@"speedometer", @"speaker.wave.2.fill", @"gamecontroller.fill", @"person.3.fill", @"power"];
-    int count = [d[@"canQuit"] boolValue] ? 5 : 4;
+    BOOL fullscreen=[d[@"fullscreen"] boolValue];
+    NSString *display=T(fullscreen ? @"Window" : @"Fullscreen");
+    NSString *displayValue=T(fullscreen ? @"Fullscreen" : @"Window");
+    NSArray *items = ov_items(fr), *symbols = @[@"speedometer", @"speaker.wave.2.fill", @"gamecontroller.fill", @"person.3.fill",
+        fullscreen ? @"arrow.down.right.and.arrow.up.left" : @"arrow.up.left.and.arrow.down.right", @"power"];
+    int count = HQ_POWER + [d[@"canQuit"] boolValue];
+    NSArray *shoulders=ov_shoulders(d);
     CGFloat rail = cx - (count - 1) * 48;
 
     if (quick) {
         for (int i = 0; i < count; i++) {
             CGFloat x = rail + 96*i, y = l.h - 105;
             BOOL selected = i == q.selection; CGFloat radius = selected ? 38.5 : 35;
-            NSString *label = i == HQ_POWER ? quit : items[i];
+            NSString *label = i == HQ_POWER ? quit : i == HQ_DISPLAY ? display : items[i];
             ov_button(v, R(x-radius,y-radius,2*radius,2*radius), label, symbols[i], (i == HQ_NETWORK ? 26 : 31)*k, ink,
                       selected ? soft : nil, selected ? focus : nil, radius*k, selected ? 3*k : 0, OV_MAIN, i, selected);
             if (selected) {
@@ -242,11 +310,6 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
             ov_button(v,R(tx,36,widths[i],38),labels[i],nil,21*k,selected ? on : ink,
                       selected ? focus : nil,nil,19*k,0,OV_TAB,i,selected);
             tx += widths[i] + 6;
-        }
-        for (int i = 0; i < 2; i++) {
-            CGFloat x = i ? tx+4 : left-46;
-            ov_box(v,R(x,45,36,20),ink,nil,6*k,0);
-            C(x,46,36,18,i ? @"RB" : @"LB",12,NSFontWeightSemibold,on);
         }
         ov_label(v,R(l.w-264,44,200,30),d[@"clock"],21*k,NSFontWeightLight,ink,NSTextAlignmentRight);
         CGFloat x = cx - 848, y = (l.h-1080)/2 + 320;
@@ -334,23 +397,25 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
             L(x,y-74,tabWidth,64,T(@"Game settings"),44,NSFontWeightRegular,ink);
             NSString *network=d[@"network"], *local=network ? [NSString stringWithFormat:@"%@ · %@",T(@"Local"),
                 [network isEqual:T(@"ZeroTier connected")] ? @"ZeroTier" : network] : (d[@"ldn"] ?: T(@"Unavailable"));
-            NSArray *values=@[ov_presets(fr)[MIN(3,MAX(0,[d[@"preset"] intValue]))],d[@"volume"] ?: @"—",d[@"controllers"] ?: @"—",local];
-            for (int i=0;i<HQ_POWER;i++) {
+            NSArray *values=@[ov_presets(fr)[[d[@"preset"] intValue]],d[@"volume"] ?: @"—",d[@"controllers"] ?: @"—",local,
+                displayValue,T(q.swap ? @"Short = quick access" : @"Short = full overlay")];
+            for (int i=0;i<=HQ_HOME_SETTING;i++) {
                 CGFloat yy=y+i*80; BOOL selected=q.selection==i;
                 ov_box(v,R(x,yy,w,72),rowGlass,selected ? focus : nil,16*k,2*k);
-                BOOL cycle=q.card<0 && i<HQ_PADS;
-                L(x+26,yy+22,q.card<0 ? w*.50 : w-50,35,items[i],21,NSFontWeightRegular,ink);
+                BOOL cycle=q.card<0 && (i<HQ_PADS || i>=HQ_DISPLAY);
+                NSString *item=i==HQ_HOME_SETTING ? T(@"Home Button") : items[i];
+                L(x+26,yy+22,q.card<0 ? w*.50 : w-50,35,item,21,NSFontWeightRegular,ink);
                 if (q.card<0) {
                     NSString *value=cycle ? values[i] : [NSString stringWithFormat:@"%@   ›",values[i]];
                     ov_label(v,R(x+w*.53,yy+22,w*.47-(cycle ? 60 : 24),35),value,21*k,NSFontWeightSemibold,muted,NSTextAlignmentRight);
                 }
                 ov_button(v,R(x,yy,w,72),@"",nil,20*k,ink,nil,nil,16*k,0,OV_MAIN,i,selected).accessibilityLabel=
-                    [NSString stringWithFormat:@"%@, %@",items[i],values[i]];
+                    [NSString stringWithFormat:@"%@, %@",item,values[i]];
                 if (cycle) for (int next=0;next<=1;next++) {
                     CGFloat span=fmax(86,[values[i] sizeWithAttributes:@{NSFontAttributeName:[NSFont systemFontOfSize:21 weight:NSFontWeightSemibold]}].width);
                     CGFloat ax=x+w-(next ? 54 : 107+span);
                     ov_button(v,R(ax,yy+12,36,48),next ? @"›" : @"‹",nil,21*k,ink,nil,nil,0,0,OV_VALUE,next ? i : -i-1,NO).accessibilityLabel=
-                        [NSString stringWithFormat:@"%@ — %@",T(next ? @"Increase" : @"Decrease"),items[i]];
+                        [NSString stringWithFormat:@"%@ — %@",T(next ? @"Increase" : @"Decrease"),item];
                 }
             }
         } else {
@@ -398,31 +463,75 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
 
     if (q.card >= 0 && q.card < count && !q.confirm) {
         NSArray *pads = d[@"controllerRows"];
-        NSArray *rows = q.card == HQ_HUD ? @[T(@"Position"),T(@"Size"),T(@"Opacity")] :
+        NSArray *rows = q.card == HQ_HUD ? @[] :
             q.card == HQ_VOLUME ? @[T(@"Game volume")] : q.card == HQ_PADS ? (pads ?: @[]) :
             @[d[@"ldn"] ?: T(@"LDN disabled"),d[@"network"] ?: T(@"VPN not configured")];
         if (!rows.count) rows = @[T(@"No controllers connected")];
         NSUInteger visible = MIN(rows.count, 8);
-        CGFloat w = q.card == HQ_HUD ? 608 : 520, h = q.card == HQ_HUD ? 330+30*[d[@"hudLater"] boolValue] : q.card == HQ_VOLUME ? 130 : 68+56*visible+(rows.count>visible ? 26 : 0);
+        CGFloat w = q.card == HQ_HUD ? 608 : 520, h = q.card == HQ_HUD ? (q.advanced ? 518 : 338)+28*([d[@"hudLater"] boolValue] || d[@"hudNotice"]!=nil) : q.card == HQ_VOLUME ? 130 : 68+56*visible+(rows.count>visible ? 26 : 0);
         CGFloat x = quick ? fmax(30,fmin(rail+96*q.selection-w/2,l.w-w-30)) : cx-478;
         CGFloat y = quick ? l.h-230-h : (l.h-1080)/2+320;
         NSView *cardView=ov_box(v,R(x,y,w,h),surface,[ink colorWithAlphaComponent:.16],18*k,k);
         cardView.layer.shadowColor=NSColor.blackColor.CGColor; cardView.layer.shadowOffset=CGSizeZero;
         cardView.layer.shadowRadius=40*k; cardView.layer.shadowOpacity=.5;
         L(x+36,y+18,340,28,q.card == HQ_HUD ? T(@"Performance HUD") : items[q.card],21,NSFontWeightSemibold,ink);
-        int first = 0;
         if (q.card == HQ_HUD) {
-            NSString *scope = d[@"scope"] ?: T(@"For this game");
-            ov_button(v,R(x+w-176,y+17,150,34),scope.uppercaseString,nil,17*k,ink,soft,q.row==4 ? focus : nil,17*k,1*k,OV_ROW,4,q.row==4);
-            ov_box(v,R(x+16,y+66,w-32,54),soft,q.row==0 ? focus : border,23*k,(q.row==0 ? 2 : 1)*k);
-            NSArray *presets = ov_presets(fr);
-            CGFloat segment=(w-42)/4;
-            for (int i = 0; i < 4; i++) {
-                BOOL selected = i == [d[@"preset"] intValue];
-                ov_button(v,R(x+21+i*segment,y+71,segment,44),presets[i],nil,21*k,selected ? on : ink,
-                          selected ? focus : nil,nil,19*k,0,OV_PRESET,i,selected);
+            NSArray *basic=@[T(@"Preset"),T(@"Opacity"),T(@"Size"),T(@"Position")];
+            NSArray *values=@[ov_presets(fr)[[d[@"preset"] intValue]],d[@"opacity"] ?: @.5,d[@"scale"] ?: @.2,
+                ov_hud_position(fr,[d[@"position"] intValue])];
+            int shown=q.advanced ? 7 : HUD_ADVANCED_ROW;
+            int start=q.advanced ? MIN(MAX(0,q.row-6),HUD_ADVANCED_COUNT-7) : 0;
+            if (q.advanced) ov_button(v,R(x+w-170,y+16,134,34),T(@"General"),nil,17*k,ink,soft,nil,17*k,0,OV_HUD_PAGE,0,NO);
+            for (int i=0;i<shown;i++) {
+                int row=start+i; BOOL selected=row==q.row;
+                CGFloat ry=y+58+i*(q.advanced ? 57 : 55);
+                NSString *label=q.advanced ? ov_hud_advanced_label(fr,row) : basic[row];
+                if (selected) ov_box(v,R(x+16,ry,w-32,50),soft,focus,15*k,2*k);
+                if (!q.advanced && (row==HUD_OPACITY_ROW || row==HUD_SCALE_ROW)) {
+                    L(x+36,ry+14,174,25,label,21,NSFontWeightRegular,ink);
+                    DmHudSlider *slider=[[DmHudSlider alloc] initWithFrame:R(x+212,ry+10,270,31)];
+                    DmHudSliderCell *cell=[DmHudSliderCell new]; cell.ink=ink; cell.fill=selected ? focus : ink; slider.cell=cell;
+                    slider.minValue=row==HUD_SCALE_ROW ? .1 : 0; slider.maxValue=1;
+                    slider.doubleValue=[values[row] doubleValue]; slider.continuous=YES;
+                    slider.tag=row; slider.target=v; slider.action=@selector(slide:);
+                    slider.accessibilityLabel=label; slider.accessibilitySelected=selected;
+                    slider.valueLabel=C(x+484,ry+14,94,26,([NSString stringWithFormat:@"%.0f %%",slider.doubleValue*100]),17,NSFontWeightSemibold,ink);
+                    [v addSubview:slider];
+                } else if (!q.advanced || row==HUD_SCOPE) {
+                    NSString *value=q.advanced ? d[@"scope"] ?: T(@"For this game") : values[row];
+                    L(x+36,ry+14,190,25,label,21,NSFontWeightRegular,ink);
+                    C(x+260,ry+14,264,25,value,21,NSFontWeightSemibold,ink);
+                    for (int next=0;next<=1;next++)
+                        ov_button(v,R(x+(next ? 536 : 214),ry+5,40,40),next ? @"›" : @"‹",nil,21*k,ink,nil,nil,0,0,OV_ROW,next ? row : -row-1,NO).accessibilityLabel=
+                            [NSString stringWithFormat:@"%@ — %@",T(next ? @"Increase" : @"Decrease"),label];
+                } else {
+                    BOOL checkbox=row>=HUD_ENABLE;
+                    BOOL checked=row==HUD_ENABLE ? [d[@"hudEnabled"] boolValue] : row<HUD_FIRST_METRIC ?
+                        ([d[@"hudOptions"] unsignedIntValue] & (1u<<(row-HUD_FIRST_OPTION)))!=0 :
+                        ([d[@"hudElements"] unsignedIntValue] & ov_hud_metrics[row-HUD_FIRST_METRIC].bit)!=0;
+                    BOOL warning=row==HUD_FIRST_OPTION+1;
+                    L(x+36,ry+(warning ? 5 : 14),w-124,25,label,21,NSFontWeightRegular,ink);
+                    if (warning) L(x+36,ry+30,w-124,18,T(@"May increase CPU cost"),13,NSFontWeightRegular,muted);
+                    if (checkbox) {
+                        ov_box(v,R(x+w-61,ry+13,24,24),checked ? focus : nil,checked ? nil : muted,5*k,k);
+                        if (checked) C(x+w-61,ry+14,24,22,@"✓",16,NSFontWeightSemibold,on);
+                    } else C(x+w-64,ry+14,30,25,@"›",21,NSFontWeightSemibold,muted);
+                    NSButton *button=ov_button(v,R(x+16,ry,w-32,50),@"",nil,20*k,ink,nil,nil,15*k,0,OV_ROW,row,selected);
+                    button.accessibilityLabel=warning ? [NSString stringWithFormat:@"%@, %@",label,T(@"May increase CPU cost")] : label;
+                    if (checkbox) { button.accessibilityRole=NSAccessibilityCheckBoxRole; button.accessibilityValue=@(checked); }
+                }
             }
-            first = 1;
+            if (!q.advanced) {
+                ov_box(v,R(x+16,y+279,w-32,44),soft,q.row==HUD_ADVANCED_ROW ? focus : nil,14*k,2*k);
+                L(x+36,y+291,216,24,T(@"Advanced"),19,NSFontWeightSemibold,ink);
+                C(x+w-64,y+289,30,26,@"›",21,NSFontWeightSemibold,muted);
+                ov_button(v,R(x+16,y+279,w-32,44),@"",nil,19*k,ink,nil,nil,14*k,0,OV_HUD_PAGE,1,q.row==HUD_ADVANCED_ROW).accessibilityLabel=T(@"Advanced");
+            }
+            if (q.advanced) L(x+36,y+472,w-72,22,([NSString stringWithFormat:@"%d / %d  ·  ↕",q.row+1,HUD_ADVANCED_COUNT]),16,NSFontWeightRegular,muted);
+            NSString *notice=d[@"hudNotice"], *later=[d[@"hudLater"] boolValue] ? T(@"At next launch") : nil;
+            NSString *status=notice && later ? [@[notice,later] componentsJoinedByString:@" · "] : notice ?: later;
+            if (status) L(x+36,y+h-30,w-72,22,status,16,NSFontWeightSemibold,muted);
+            visible=0;
         } else if (q.card == HQ_VOLUME) {
             CGFloat fraction = fmax(0,fmin(1,[d[@"volume"] intValue]/100.0));
             ov_box(v,R(x+10,y+62,w-20,52),soft,focus,12*k,2*k);
@@ -438,18 +547,8 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
             visible = 0;
         }
         for (NSUInteger i=0; i<visible; i++) {
-            CGFloat ry = q.card==HQ_HUD ? y+129+i*64 : y+62+(first+i)*56;
-            if (q.card == HQ_HUD) {
-                NSInteger row = i+first; BOOL selected = row == q.row;
-                NSArray *values = @[d[@"position"] ?: @"",d[@"size"] ?: @"",d[@"opacity"] ?: @""];
-                if (selected) ov_box(v,R(x+16,ry,w-32,56),soft,focus,16*k,2*k);
-                L(x+42,ry+17,220,28,rows[i],21,NSFontWeightRegular,ink);
-                C(x+w-284,ry+17,196,28,values[i],21,NSFontWeightSemibold,ink);
-                ov_button(v,R(x+w-336,ry+7,46,42),@"‹",nil,21*k,ink,nil,nil,0,0,OV_ROW,-row-1,NO);
-                ((NSButton *)v.subviews.lastObject).accessibilityLabel = [NSString stringWithFormat:@"%@ — %@",T(@"Decrease"),rows[i]];
-                ov_button(v,R(x+w-82,ry+7,46,42),@"›",nil,21*k,ink,nil,nil,0,0,OV_ROW,row,NO);
-                ((NSButton *)v.subviews.lastObject).accessibilityLabel = [NSString stringWithFormat:@"%@ — %@",T(@"Increase"),rows[i]];
-            } else if (q.card == HQ_PADS && pads.count) {
+            CGFloat ry = y+62+i*56;
+            if (q.card == HQ_PADS && pads.count) {
                 int player = [pads[i][@"player"] intValue];
                 NSString *slot = player ? [NSString stringWithFormat:T(@"Player %d"),player] : T(@"Not assigned");
                 L(x+36,ry+2,360,18,slot,13,NSFontWeightSemibold,muted);
@@ -462,7 +561,6 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
                 L(x+(q.card==HQ_NETWORK ? 54 : 36),ry+9,w-92,29,rows[i],18,NSFontWeightRegular,ink);
             }
         }
-        if (q.card == HQ_HUD && [d[@"hudLater"] boolValue]) L(x+36,y+h-36,w-72,22,T(@"At next launch"),16,NSFontWeightSemibold,muted);
         if (q.card == HQ_PADS && rows.count > visible)
             L(x+36,y+h-30,w-72,22,([NSString stringWithFormat:@"+%lu",(unsigned long)(rows.count-visible)]),16,NSFontWeightSemibold,muted);
     }
@@ -482,21 +580,44 @@ static NSView *ov_view(NSRect bounds, home_quit q, NSDictionary *d, NSDictionary
     }
     if (d[@"homeHelp"] && !q.confirm && q.card < 0)
         C(190,quick ? l.h-248 : l.h-135,l.w-380,23,d[@"homeHelp"],16,NSFontWeightRegular,muted);
+    if (q.card<0 && !q.confirm && !d[@"homeHelp"]) {
+        NSString *gesture=T(quick==!!q.swap ? (quick ? @"Short = quick access" : @"Short = full overlay") :
+            (quick ? @"Hold = quick access" : @"Hold = full overlay"));
+        ov_box(v,R(238,l.h-80,32,32),ink,nil,16*k,0);
+        C(238,l.h-74,32,20,@"⌂",16,NSFontWeightSemibold,on);
+        L(278,l.h-77,320,28,gesture,21,NSFontWeightRegular,ink);
+    }
     NSString *back = !quick && q.card < 0 && !q.tab && !q.confirm ? resume : T(@"Back");
     NSMutableArray *hints = [NSMutableArray arrayWithObject:@[@"B",back,@(OV_BACK)]];
-    if (q.confirm || q.tab < OV_PROFILE || (q.tab==OV_PROFILE && [d[@"canArcane"] boolValue] && ov_string(d[@"social"][@(OV_PROFILE)][@"name"])))
+    BOOL slider=q.card==HQ_HUD && !q.advanced && (q.row==HUD_OPACITY_ROW || q.row==HUD_SCALE_ROW);
+    if (q.confirm || (q.card<0 && (q.tab < OV_PROFILE || (q.tab==OV_PROFILE && [d[@"canArcane"] boolValue] && ov_string(d[@"social"][@(OV_PROFILE)][@"name"])))) ||
+        q.card==HQ_VOLUME || (q.card==HQ_HUD && !slider))
         [hints addObject:@[@"A",T(@"Choose"),@(-1)]];
     if (quick && !q.confirm) [hints addObject:@[@"Y",T(@"Full overlay"),@(OV_FULL)]];
+    if (!q.confirm) {
+        NSString *page=q.card==HQ_HUD ? T(q.advanced ? @"General" : @"Advanced") : T(quick ? @"Cards" : @"Tabs");
+        [hints addObject:@[shoulders[1],page,@(OV_SHOULDER),@1]];
+        [hints addObject:@[shoulders[0],@"",@(OV_SHOULDER),@(-1)]];
+        if (slider) {
+            [hints addObject:@[shoulders[3],T(@"Large step"),@(-1)]];
+            [hints addObject:@[shoulders[2],@"",@(-1)]];
+        }
+    }
     CGFloat right = l.w-64;
     for (NSArray *hint in hints) {
         NSString *letter = hint[0], *label = hint[1]; NSInteger action = [hint[2] integerValue];
-        CGFloat w = ceil([label sizeWithAttributes:@{NSFontAttributeName:[NSFont systemFontOfSize:21]}].width) + 3;
-        CGFloat x = action == OV_BACK ? 64 : right-w-42;
-        if (action != OV_BACK) right = x-18;
-        ov_box(v,R(x,l.h-80,32,32),ink,nil,16*k,0);
-        C(x,l.h-74,32,20,letter,16,NSFontWeightSemibold,on);
-        if (action >= 0) ov_button(v,R(x+36,l.h-82,w+8,36),label,nil,21*k,ink,nil,nil,0,0,action,0,NO);
-        else L(x+42,l.h-77,w+8,28,label,21,NSFontWeightRegular,ink);
+        CGFloat w = label.length ? ceil([label sizeWithAttributes:@{NSFontAttributeName:[NSFont systemFontOfSize:21]}].width) + 16 : 0;
+        CGFloat x = action == OV_BACK ? 64 : right-w-32;
+        if (action != OV_BACK) right = x-(label.length ? 20 : 14);
+        NSInteger index=hint.count>3 ? [hint[3] integerValue] : 0;
+        if (action == OV_SHOULDER)
+            ov_button(v,R(x,l.h-80,32,32),letter,nil,13*k,on,ink,nil,16*k,0,action,index,NO);
+        else {
+            ov_box(v,R(x,l.h-80,32,32),ink,nil,16*k,0);
+            ov_label(v,R(x,l.h-73,32,20),letter,(letter.length>1 ? 13 : 17)*k,NSFontWeightSemibold,on,NSTextAlignmentCenter);
+        }
+        if (label.length && action>=0 && action!=OV_SHOULDER) ov_button(v,R(x+36,l.h-82,w-4,36),label,nil,21*k,ink,nil,nil,0,0,action,index,NO);
+        else if (label.length) L(x+41,l.h-77,w-6,28,label,21,NSFontWeightRegular,ink);
     }
 #undef T
 #undef TYPE

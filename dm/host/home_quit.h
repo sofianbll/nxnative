@@ -8,9 +8,10 @@
 #define HQ_HOLD_S 0.5
 #define HQ_STICK 0.5
 
-typedef enum { HQ_IDLE, HQ_HOLDING, HQ_QUICK, HQ_FULL, HQ_SETTLE, HQ_QUIT, HQ_PAUSED } hq_phase;
+typedef enum { HQ_IDLE, HQ_HOLDING, HQ_QUICK, HQ_FULL, HQ_SETTLE, HQ_QUIT, HQ_PAUSED, HQ_DISPLAYING } hq_phase;
 enum { HQ_HOME = 1, HQ_PLUS = 2, HQ_A = 4, HQ_B = 8, HQ_Y = 16,
-       HQ_LEFT = 32, HQ_RIGHT = 64, HQ_UP = 128, HQ_DOWN = 256, HQ_L = 512, HQ_R = 1024, HQ_OTHER = 2048 };
+       HQ_LEFT = 32, HQ_RIGHT = 64, HQ_UP = 128, HQ_DOWN = 256, HQ_L = 512, HQ_R = 1024, HQ_OTHER = 2048,
+       HQ_ZL = 4096, HQ_ZR = 8192 };
 // Leave a small neutral zone for drift; navigation still takes a deliberate tilt of the left stick.
 static inline unsigned hq_stick_bits(const int32_t s[4]) {
     const int32_t neutral = DM_STICK_MAX / 20;
@@ -19,30 +20,51 @@ static inline unsigned hq_stick_bits(const int32_t s[4]) {
     for (int i = 0; i < 4; i++) if (s[i] < -neutral || s[i] > neutral) return bits | HQ_OTHER;
     return bits;
 }
-enum { HQ_HUD, HQ_VOLUME, HQ_PADS, HQ_NETWORK, HQ_POWER };
+enum { HQ_HUD, HQ_VOLUME, HQ_PADS, HQ_NETWORK, HQ_DISPLAY, HQ_POWER, HQ_HOME_SETTING = HQ_POWER };
 typedef struct {
     hq_phase phase;
     double since;
     unsigned buttons, trigger;
-    int disabled, no_hold;
-    int selection, card, row, tab, confirm;
+    int disabled, no_hold, swap;
+    int selection, card, row, tab, confirm, advanced;
 } home_quit;
 
 static inline int hq_enabled(const char *env) { return !(env && !strcmp(env, "0")); }
 static inline int hq_menu_enabled(const char *launcher, const char *menu) { return launcher && !strcmp(launcher, "1") && hq_enabled(menu); }
 static inline int hq_visible(hq_phase p) { return p == HQ_QUICK || p == HQ_FULL; }
 static inline int hq_blocks_input(hq_phase p) { return p != HQ_IDLE && p != HQ_HOLDING; }
+static inline hq_phase hq_short(const home_quit *q) { return q->swap ? HQ_QUICK : HQ_FULL; }
+static inline hq_phase hq_long(const home_quit *q) { return q->swap ? HQ_FULL : HQ_QUICK; }
+static inline int hq_shoulders(unsigned nav) { return !!(nav & HQ_R) - !!(nav & HQ_L); }
+static inline int hq_neighbor(int current, int step, int count) { return (current + step + count) % count; }
+static inline void hq_hud_page(home_quit *q, int advanced) { q->advanced = advanced; q->row = 0; }
+static inline void hq_quick_neighbor(home_quit *q, int step) {
+    q->selection = hq_neighbor(q->selection,step,HQ_POWER + !q->no_hold);
+    if (q->card >= 0) q->card = q->selection < HQ_DISPLAY ? q->selection : -1;
+    hq_hud_page(q,0);
+}
+static inline int hq_slider_repeat(double now, double *since, double *next, unsigned *held, unsigned directions) {
+    if (!directions || directions != *held) {
+        *held=directions; *since=now; *next=now+.30;
+        return 0;
+    }
+    if (now < *next) return 0;
+    *next=now+.07;
+    return now-*since>=1.0 ? 4 : 1;
+}
+static inline void hq_display_done(home_quit *q) { if (q->phase == HQ_DISPLAYING) q->phase = HQ_SETTLE; }
 static inline void hq_open(home_quit *q, hq_phase phase) {
-    q->phase = phase; q->selection = q->row = q->tab = q->confirm = 0; q->card = -1;
+    q->phase = phase; q->selection = q->row = q->tab = q->confirm = q->advanced = 0; q->card = -1;
 }
 static inline void hq_back(home_quit *q) {
     if (q->confirm) { q->confirm = 0; q->row = 0; }
+    else if (q->card == HQ_HUD && q->advanced) hq_hud_page(q,0);
     else if (q->card >= 0) { q->card = -1; q->row = 0; }
     else if (q->tab) { q->tab = 0; q->selection = 0; }
     else q->phase = HQ_SETTLE;
 }
 static inline void hq_key_open(home_quit *q, hq_phase phase) {
-    if (!q->disabled && q->phase != HQ_PAUSED && q->phase != HQ_QUIT && q->phase != HQ_SETTLE && q->phase != phase)
+    if (!q->disabled && q->phase != HQ_PAUSED && q->phase != HQ_QUIT && q->phase != HQ_SETTLE && q->phase != HQ_DISPLAYING && q->phase != phase)
         hq_open(q, phase);
 }
 
@@ -58,9 +80,9 @@ static inline unsigned hq_step(home_quit *q, double now, unsigned buttons, int *
         break;
     }
     case HQ_HOLDING:
-        if (!q->no_hold && now >= q->since + HQ_HOLD_S) hq_open(q, HQ_QUICK);
+        if (!q->no_hold && now >= q->since + HQ_HOLD_S) hq_open(q, hq_long(q));
         else if (!(buttons & q->trigger)) {
-            if (q->trigger == HQ_HOME && now < q->since + HQ_HOLD_S) hq_open(q, HQ_FULL);
+            if (q->trigger == HQ_HOME && now < q->since + HQ_HOLD_S) hq_open(q, hq_short(q));
             else { *menu_tap = q->trigger == HQ_PLUS; q->phase = HQ_IDLE; }
         }
         break;
@@ -73,13 +95,13 @@ static inline unsigned hq_step(home_quit *q, double now, unsigned buttons, int *
     case HQ_SETTLE:
         if (!buttons) q->phase = HQ_IDLE;
         break;
-    case HQ_PAUSED: case HQ_QUIT:
+    case HQ_PAUSED: case HQ_QUIT: case HQ_DISPLAYING:
         break;
     }
     return 0;
 }
 static inline void hq_cancel(home_quit *q) {
-    if (q->phase != HQ_QUIT && q->phase != HQ_PAUSED) {
+    if (q->phase != HQ_QUIT && q->phase != HQ_PAUSED && q->phase != HQ_DISPLAYING) {
         q->phase = hq_blocks_input(q->phase) ? HQ_SETTLE : HQ_IDLE;
         q->buttons = HQ_HOME | HQ_PLUS;
     }
