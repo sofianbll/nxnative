@@ -97,19 +97,27 @@ static uint32_t friends_snapshot(dm_social_friend **output,size_t *count,bool re
 uint32_t dm_nextendo_social_friends(dm_social_friend **output,size_t *count) { return friends_snapshot(output,count,false); }
 uint32_t dm_nextendo_social_friends_refresh(dm_social_friend **output,size_t *count) { return friends_snapshot(output,count,true); }
 
-// Nextendo shows a player online while presence keeps arriving (Mush8 sends it again every 45 seconds). The last presence a game published
-// is sent again on that period until the game publishes status 0 (its online session closed) or a send fails
+// Nextendo expires presence after 90 seconds. Refresh every 45 seconds, including after a transient failure.
 enum { PRESENCE_EVERY_S = 45 };
 // A publish returns once the presence is queued, as UserPresence::Commit and Declare*OnlinePlaySession do on a console: they hand it to the friends
 // service, which uploads it in the background, and the game is never told how the upload went. Waiting for the request on the game's thread held a
 // menu change for a round trip to nextendo.network (up to the request's 15 s timeout on a poor network). One serial queue sends and repeats, so a
-// repeat never lands after a newer publish, and only the newest presence still waiting is sent: a menu that publishes several in a row sends one
+// repeat never lands after a newer publish, and only the newest presence still waiting is sent.
 static pthread_mutex_t g_presence_lock = PTHREAD_MUTEX_INITIALIZER;
-static NSData *g_presence_waiting;        // the newest published body not sent yet, and its status (under g_presence_lock)
+static bool g_presence_pending;           // the newest SDK publish (under g_presence_lock)
+static bool g_presence_update_field;
+static NSData *g_presence_waiting_field;
 static unsigned g_presence_waiting_status;
-static NSData *g_presence_body;           // on presence_queue(): the last body sent while its status is not 0, which the timer sends again
+static NSData *g_presence_body;           // on presence_queue(): the current body and the SDK field it carries
+static NSData *g_presence_field;
+static NSData *g_presence_online_identity;  // only send offline for a sign-in that published successfully
 static dispatch_source_t g_presence_timer;
-static bool g_presence_failing;           // on presence_queue(): the last send failed (logged once per run of failures)
+static bool g_presence_failing;
+static atomic_bool g_presence_used, g_presence_stopped;
+static bool presence_enabled(void) {
+    const char *value=getenv("DM_NEXTENDO_PRESENCE");
+    return !value || strcmp(value,"0");
+}
 static dispatch_queue_t presence_queue(void) {
     static dispatch_queue_t queue; static dispatch_once_t once;
     dispatch_once(&once,^{ queue=dispatch_queue_create("nextendo.presence",dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,QOS_CLASS_UTILITY,0)); });
@@ -120,31 +128,31 @@ static uint32_t presence_post(NSData *body,NSData *identity) {
     uint32_t result=dm_nextendo_api_request("presence",body.bytes,body.length,response,sizeof response,&count);
     return !result&&[identity isEqual:dm_nextendo_api_identity()]?0:DM_ACCOUNT_FAIL;
 }
-static void presence_keep(NSData *body) {   // on presence_queue(); nil stops the repeats
-    g_presence_body=body;
-    if (body && !g_presence_timer) {
-        g_presence_timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,presence_queue());
-        dispatch_source_set_timer(g_presence_timer,dispatch_time(DISPATCH_TIME_NOW,PRESENCE_EVERY_S*NSEC_PER_SEC),PRESENCE_EVERY_S*NSEC_PER_SEC,5*NSEC_PER_SEC);
-        dispatch_source_set_event_handler(g_presence_timer,^{ @autoreleasepool {
-            NSData *again=g_presence_body,*identity=again?dm_nextendo_api_identity():nil;
-            if (again && (!identity || presence_post(again,identity))) g_presence_body=nil;
-        } });
-        dispatch_resume(g_presence_timer);
-    }
-}
-static void presence_send(void) { @autoreleasepool {   // on presence_queue()
-    pthread_mutex_lock(&g_presence_lock);
-    NSData *body=g_presence_waiting; unsigned status=g_presence_waiting_status; g_presence_waiting=nil;
-    pthread_mutex_unlock(&g_presence_lock);
-    if (!body) return;   // a send queued earlier already took this publish
+static void presence_send(NSData *body) { @autoreleasepool {   // on presence_queue()
+    if (!body || atomic_load(&g_presence_stopped) || !presence_enabled()) return;
     NSData *identity=dm_nextendo_api_identity();
-    uint32_t result=identity?presence_post(body,identity):DM_ACCOUNT_FAIL;
-    if (result && !g_presence_failing) fprintf(stderr,"[dm] [RED] nextendo: presence not sent (the game is not told, as on a console; the next publish tries again)\n");
+    if (!identity || atomic_load(&g_presence_stopped)) return;
+    uint32_t result=presence_post(body,identity);
+    if (result && !g_presence_failing) fprintf(stderr,"[dm] [RED] nextendo: presence not sent (the game is not told; the next refresh tries again)\n");
+    if (!result && dm_net_mode()==DM_NET_NEXTENDO && body==g_presence_body && (!g_presence_online_identity || g_presence_failing))
+        fprintf(stderr,"[dm] nextendo: presence published (in game %s)\n",DM_GAME_ID);
     g_presence_failing=result!=0;
-    presence_keep(!result&&status?body:nil);
+    if (!result) g_presence_online_identity=identity;
 } }
+static void presence_keep(NSData *body) {   // on presence_queue()
+    g_presence_body=body;
+    if (!body || g_presence_timer) return;
+    g_presence_timer=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,presence_queue());
+    dispatch_source_set_timer(g_presence_timer,dispatch_time(DISPATCH_TIME_NOW,PRESENCE_EVERY_S*NSEC_PER_SEC),PRESENCE_EVERY_S*NSEC_PER_SEC,5*NSEC_PER_SEC);
+    dispatch_source_set_event_handler(g_presence_timer,^{ presence_send(g_presence_body); });
+    dispatch_resume(g_presence_timer);
+}
 #ifdef DM_NEXTENDO_API_TEST
 void dm_nextendo_social_flush(void) { dispatch_sync(presence_queue(),^{}); }
+unsigned dm_nextendo_social_tick(void) {
+    dispatch_sync(presence_queue(),^{ if (g_presence_timer) presence_send(g_presence_body); });
+    return PRESENCE_EVERY_S;
+}
 #endif
 static NSString *game_title(void) { return [@DM_GAME_ID lowercaseString]; }
 static NSString *game_name(void) {   // the app's name, the game's title ID without one
@@ -164,16 +172,69 @@ static NSString *presence_description(const uint8_t *field,size_t size) {
     }
     return @"";
 }
+static NSData *presence_body(unsigned status,NSData *field) {
+    NSDictionary *object=@{@"status":@(status),@"app_id":status?game_title():@"",@"jeu":status?game_name():@"",
+        @"app_field":[field base64EncodedStringWithOptions:0] ?: @"",
+        @"plateforme":@"nxnative",@"app_detail":presence_description(field.bytes,field.length)};
+    return [NSJSONSerialization dataWithJSONObject:object options:0 error:nil];
+}
+static void presence_send_pending(void) { @autoreleasepool {
+    pthread_mutex_lock(&g_presence_lock);
+    bool pending=g_presence_pending; g_presence_pending=false;
+    bool update_field=g_presence_update_field; g_presence_update_field=false;
+    NSData *field=g_presence_waiting_field; g_presence_waiting_field=nil;
+    unsigned status=g_presence_waiting_status;
+    pthread_mutex_unlock(&g_presence_lock);
+    if (!pending || atomic_load(&g_presence_stopped)) return;
+    // Opening an online session carries no SDK field. Keep the latest Commit; a close clears join data.
+    if (update_field) g_presence_field=field;
+    // Closing the SDK session does not quit the running game.
+    if (status==1 && dm_net_mode()==DM_NET_NEXTENDO) status=2;
+    NSData *body=presence_body(status,g_presence_field);
+    presence_keep(status?body:nil);
+    presence_send(body);
+    if (!status) g_presence_online_identity=nil;
+} }
+static void presence_on_exit(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once,^{ atexit(dm_nextendo_presence_stop); });
+    atomic_store(&g_presence_used,true);
+}
+void dm_nextendo_presence_start(void) {
+    if (dm_net_mode()!=DM_NET_NEXTENDO || !presence_enabled() || atomic_load(&g_presence_stopped)) return;
+    presence_on_exit();
+    dispatch_async(presence_queue(),^{ @autoreleasepool {
+        if (g_presence_body || atomic_load(&g_presence_stopped)) return;
+        NSData *body=presence_body(2,nil);
+        presence_keep(body);
+        presence_send(body);
+    } });
+}
+void dm_nextendo_presence_stop(void) {
+    if (atomic_exchange(&g_presence_stopped,true) || !atomic_load(&g_presence_used)) return;
+    dispatch_semaphore_t done=dispatch_semaphore_create(0);
+    dispatch_async(presence_queue(),^{ @autoreleasepool {
+        if (g_presence_timer) { dispatch_source_cancel(g_presence_timer); g_presence_timer=nil; }
+        g_presence_body=nil;
+        NSData *identity=g_presence_online_identity;
+        if (presence_enabled() && identity && [identity isEqual:dm_nextendo_api_identity()])
+            presence_post(presence_body(0,nil),identity);
+        dispatch_semaphore_signal(done);
+    } });
+    // Best effort on a clean exit; don't hold up quit for a slow request. Otherwise Nextendo expires the presence.
+    dispatch_semaphore_wait(done,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC));
+}
 uint32_t dm_nextendo_social_publish(unsigned status,const uint8_t *app_field,size_t size) { @autoreleasepool {
-    if(status>2||size>DM_SOCIAL_APP_FIELD||(size&&!app_field))return DM_ACCOUNT_FAIL;
-    NSData *identity=dm_nextendo_api_identity();if(!identity)return DM_ACCOUNT_FAIL;
-    NSData *field=[NSData dataWithBytes:app_field length:size];
-    NSDictionary *object=@{@"status":@(status),@"app_id":game_title(),@"jeu":game_name(),@"app_field":[field base64EncodedStringWithOptions:0],
-        @"plateforme":@"nxnative",@"app_detail":size?presence_description(app_field,size):@""};
-    NSData *body=[NSJSONSerialization dataWithJSONObject:object options:0 error:nil];
-    if(!body)return DM_ACCOUNT_FAIL;
-    pthread_mutex_lock(&g_presence_lock); g_presence_waiting=body; g_presence_waiting_status=status; pthread_mutex_unlock(&g_presence_lock);
-    dispatch_async(presence_queue(),^{ presence_send(); });
+    if (!presence_enabled() || atomic_load(&g_presence_stopped)) return 0;
+    if(status>2||size>DM_SOCIAL_APP_FIELD||(size&&!app_field)||!dm_nextendo_api_identity())return DM_ACCOUNT_FAIL;
+    presence_on_exit();
+    NSData *field=size?[NSData dataWithBytes:app_field length:size]:nil;
+    pthread_mutex_lock(&g_presence_lock);
+    // An Open queued just after Commit must not discard that still-unsent field.
+    if (field || status!=2) { g_presence_waiting_field=field; g_presence_update_field=true; }
+    g_presence_waiting_status=status; g_presence_pending=true;
+    pthread_mutex_unlock(&g_presence_lock);
+    dispatch_async(presence_queue(),^{ presence_send_pending(); });
     return 0;
 } }
 

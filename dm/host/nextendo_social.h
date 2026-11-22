@@ -22,6 +22,9 @@ uint32_t dm_nextendo_presence_initialize(void *object,const void *uid);
 uint32_t dm_nextendo_presence_commit(const void *object);
 uint32_t dm_nextendo_presence_describe(void *object, const char *description);   // UserPresence::SetDescription: the SDK's own code with Nextendo on, else a failure
 uint32_t dm_nextendo_social_publish(unsigned status,const uint8_t *app_field,size_t size);   // queues the presence and returns (hle_nextendo_social_apple.m sends it)
+void dm_nextendo_presence_start(void);   // after the first game credential
+void dm_nextendo_presence_stop(void);    // clean host exit; no repeats afterwards
 #ifdef DM_NEXTENDO_API_TEST
 void dm_nextendo_social_flush(void);   // waits for the presence sends queued so far
+unsigned dm_nextendo_social_tick(void);   // fires the active timer's handler without waiting, returns the interval in seconds
 #endif

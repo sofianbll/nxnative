@@ -12,6 +12,7 @@
 #if TARGET_OS_OSX || TARGET_OS_IOS
 #import "nextendo_login_apple.inc"
 #include "nextendo_account.h"
+#include "nextendo_social.h"
 #import "nextendo_api_apple.h"
 #include <dispatch/dispatch.h>
 #include <pthread.h>
@@ -64,6 +65,7 @@ static bool provide_credential(uint8_t *buffer, size_t capacity, size_t *size) {
     // DM_NETWORK, and then loader.c's nextendo_main saw no Nextendo (Mario Kart 8 Deluxe, 2026-11-14). It starts once either way
     static atomic_bool asked;
     if (usable && !atomic_exchange(&asked, true)) {
+        dm_nextendo_presence_start();
         dm_nextendo_session_start();
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ dm_nextendo_login_online_check("at the game's first sign-in"); });
     }
