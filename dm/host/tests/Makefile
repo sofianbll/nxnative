@@ -343,7 +343,7 @@ account-saves: $(B)/t_account_save
 $(B)/t_account_save: t_account_save.c t_fs_stub.c t_nextendo_off.c ../hle_account.c ../hle_account_users.c ../account_users.h ../hle_fs.c ../hle_bigstack.c ../save_sync.c ../hle.h ../front.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_account_save.c t_fs_stub.c t_nextendo_off.c ../hle_account_users.c ../hle_bigstack.c ../save_sync.c
 run: $(B)/t_home_quit $(B)/t_home_quit_mac $(B)/t_game_overlay_mac
-$(B)/t_home_quit: t_home_quit.c ../home_quit.h | $(B)
+$(B)/t_home_quit: t_home_quit.c ../home_quit.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_home_quit.c
 $(B)/t_home_quit_mac: t_home_quit_mac.m ../home_quit_mac.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -I.. -o $@ t_home_quit_mac.m -framework Cocoa -framework QuartzCore

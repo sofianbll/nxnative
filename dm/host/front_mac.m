@@ -169,9 +169,11 @@ static int fn_shortcut(NSEvent *e) {
 static ctrl_prompt g_cp; static int g_cp_confirm, g_cp_cancel;   // the controller applet's prompt (front_ctrl_support) and a key pressed in it since its last step
 static int cp_poll(void);
 static int hq_menu_key(unsigned short code, int down);
+static NSMutableIndexSet *g_ov_keys_down;
 static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
     unsigned short c = e.keyCode;
+    if (!down) [g_ov_keys_down removeIndex:c];
     if (cp_blocks_input(g_cp.phase)) {   // the prompt has the keyboard: Return or J (A) is done, Escape or K (B) closes it, no key reaches the game
         if (down && g_cp.phase == CP_OPEN) { if (c == 53 || c == 40) g_cp_cancel = 1; else if (c == 36 || c == 38) g_cp_confirm = 1; cp_poll(); }
         return;
@@ -222,7 +224,7 @@ static void pads_motion_changed(GCController *gone);
 // GameController's controllers that the host reads from their HID reports instead, so they stay unread here: identical pads (pad_hid_mac.h) and original Joy-Cons (pad_jc1_mac.h)
 static int pad_gc_unread(GCController *c) { return hidpad_gc_unread(c) || jc1_gc_unread(c); }
 static void pad_read(GCExtendedGamepad *g) {
-    if (!g_input_on) return;
+    if (!g_input_on || (g_merge && jc1_gc_unread(g.controller))) return;
     hq_poll(); if (hq_blocks_input(g_hq.phase)) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller);
     if (p < 0 && (!g_press_to_join || pad_gc_unread(g.controller))) return;   // a controller read from its HID reports: GameController's controller of it stays unread
@@ -549,7 +551,6 @@ static ov_hud g_hud;
 static BOOL g_hud_live;   // Metal's HUD was enabled before the first device, so its properties change live
 static int g_ov_volume = 100;
 static unsigned g_hq_pulse_serial;
-static NSMutableIndexSet *g_ov_keys_down;
 static unsigned short g_ov_keys[2];
 static char g_hq_text[HQ_TEXTS][256];
 static void bg_enter(void);
@@ -642,13 +643,11 @@ static void hq_home_preference(GCController *c) {
     home.preferredSystemGestureState = GCSystemGestureStateDisabled;
     c.extendedGamepad.buttonHome.preferredSystemGestureState = GCSystemGestureStateDisabled;
 }
-static unsigned hq_pad_bits(uint64_t m, int32_t x, int32_t y) {
+static unsigned hq_pad_bits(uint64_t m, const int32_t s[4]) {
     return (m & DM_BTN_Y ? HQ_Y : 0) | (m & DM_BTN_PLUS ? HQ_PLUS : 0) |
         (m & DM_BTN_L ? HQ_L : 0) | (m & DM_BTN_R ? HQ_R : 0) |
-        (m & DM_BTN_LEFT || x < -DM_STICK_MAX*HQ_STICK ? HQ_LEFT : 0) |
-        (m & DM_BTN_RIGHT || x > DM_STICK_MAX*HQ_STICK ? HQ_RIGHT : 0) |
-        (m & DM_BTN_UP || y > DM_STICK_MAX*HQ_STICK ? HQ_UP : 0) |
-        (m & DM_BTN_DOWN || y < -DM_STICK_MAX*HQ_STICK ? HQ_DOWN : 0) |
+        (m & DM_BTN_LEFT ? HQ_LEFT : 0) | (m & DM_BTN_RIGHT ? HQ_RIGHT : 0) |
+        (m & DM_BTN_UP ? HQ_UP : 0) | (m & DM_BTN_DOWN ? HQ_DOWN : 0) | hq_stick_bits(s) |
         (m & ~(DM_BTN_Y|DM_BTN_PLUS|DM_BTN_LEFT|DM_BTN_RIGHT|DM_BTN_UP|DM_BTN_DOWN|DM_BTN_L|DM_BTN_R) ? HQ_OTHER : 0);
 }
 static unsigned hq_buttons(int *menu_player) {
@@ -657,29 +656,33 @@ static unsigned hq_buttons(int *menu_player) {
         GCExtendedGamepad *g = c.extendedGamepad;
         GCControllerButtonInput *home = g.buttonHome ?: c.physicalInputProfile.buttons[GCInputButtonHome];
         if (home.isPressed) bits |= HQ_HOME;
-        if (!g || pad_gc_unread(c)) continue;
+        if (!g || (g_merge ? jc1_gc_unread(c) : pad_gc_unread(c))) continue;
         if (g.buttonMenu.isPressed) { bits |= HQ_PLUS; *menu_player = g_merge ? 0 : pad_slot_of(&g_slots,(__bridge const void *)c); }
+        int32_t s[4] = {pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value),
+                        pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value)};
         bits |= (g.buttonA.isPressed ? HQ_A : 0) | (g.buttonB.isPressed ? HQ_B : 0) | (g.buttonY.isPressed ? HQ_Y : 0) |
             (g.leftShoulder.isPressed ? HQ_L : 0) | (g.rightShoulder.isPressed ? HQ_R : 0) |
-            (g.dpad.left.isPressed || g.leftThumbstick.xAxis.value < -HQ_STICK ? HQ_LEFT : 0) |
-            (g.dpad.right.isPressed || g.leftThumbstick.xAxis.value > HQ_STICK ? HQ_RIGHT : 0) |
-            (g.dpad.up.isPressed || g.leftThumbstick.yAxis.value > HQ_STICK ? HQ_UP : 0) |
-            (g.dpad.down.isPressed || g.leftThumbstick.yAxis.value < -HQ_STICK ? HQ_DOWN : 0) |
+            (g.dpad.left.isPressed ? HQ_LEFT : 0) | (g.dpad.right.isPressed ? HQ_RIGHT : 0) |
+            (g.dpad.up.isPressed ? HQ_UP : 0) | (g.dpad.down.isPressed ? HQ_DOWN : 0) | hq_stick_bits(s) |
             (g.buttonX.isPressed || g.buttonOptions.isPressed || g.leftTrigger.value>.25f || g.rightTrigger.value>.25f ||
-             g.leftThumbstickButton.isPressed || g.rightThumbstickButton.isPressed ||
-             fabs(g.rightThumbstick.xAxis.value)>HQ_STICK || fabs(g.rightThumbstick.yAxis.value)>HQ_STICK ? HQ_OTHER : 0);
+             g.leftThumbstickButton.isPressed || g.rightThumbstickButton.isPressed ? HQ_OTHER : 0);
     }
     for (s2_pad *d = dm_switch2_pads(); d; d = d->next) {
         int a=0,b=0; s2_pad_ab(&d->st,&a,&b);
         bits |= (a ? HQ_A : 0) | (b ? HQ_B : 0) | (s2_pad_home(&d->st) ? HQ_HOME : 0);
         uint64_t m; int32_t s[4];
-        if (s2_pad_input(&d->st,&m,s)) { bits |= hq_pad_bits(m,s[0],s[1]); if (m & DM_BTN_PLUS) *menu_player = s2pad_player(d); }
+        if (s2_pad_input(&d->st,&m,s)) { bits |= hq_pad_bits(m,s); if (m & DM_BTN_PLUS) *menu_player = s2pad_player(d); }
+        // A pair's Pro-style mapping drops the rail buttons that its native Joy-Con path still sends.
+        if ((d->st.left.have && (d->st.left.r.buttons & (S2_SL_L|S2_SR_L))) ||
+            (d->st.right.have && (d->st.right.r.buttons & (S2_SL_R|S2_SR_R)))) bits |= HQ_OTHER;
     }
     for (jc1_pad *d = g_jc1_pads; d; d = d->next) {
         int a=0,b=0; jc1_pad_ab(d,&a,&b);
         bits |= (a ? HQ_A : 0) | (b ? HQ_B : 0) | (jc1_pad_home(d) ? HQ_HOME : 0);
         uint64_t m; int32_t s[4];
-        if (jc1_pad_state(d,&m,s)) { bits |= hq_pad_bits(m,s[0],s[1]); if (m & DM_BTN_PLUS) *menu_player = jc1pad_player(d); }
+        if (jc1_pad_state(d,&m,s)) { bits |= hq_pad_bits(m,s); if (m & DM_BTN_PLUS) *menu_player = jc1pad_player(d); }
+        for (int i = 0; i < 2; i++)
+            if (d->side[i] && d->side[i]->have && (d->side[i]->buttons & (DM_BTN_LSL|DM_BTN_LSR|DM_BTN_RSL|DM_BTN_RSR))) bits |= HQ_OTHER;
     }
     for (hid_pad *d = g_hidpads; d; d = d->next) {
         uint32_t q = hidpad_quit_buttons(d);
@@ -689,7 +692,7 @@ static unsigned hq_buttons(int *menu_player) {
         uint64_t m = full ? d->pro_m : pad_hid_buttons(&d->st);
         if (d->st.layout != PAD_HID_NINTENDO && !full) bits |= (m & DM_BTN_A ? HQ_A : 0) | (m & DM_BTN_B ? HQ_B : 0);
         hidpad_menu_dirs(d,&up,&down,DM_STICK_MAX*HQ_STICK);
-        bits |= hq_pad_bits(m,full ? d->pro_s[0] : s[0],full ? d->pro_s[1] : s[1]) | (up ? HQ_UP : 0) | (down ? HQ_DOWN : 0);
+        bits |= hq_pad_bits(m,full ? d->pro_s : s) | (up ? HQ_UP : 0) | (down ? HQ_DOWN : 0);
         if (m & DM_BTN_PLUS) *menu_player = hidpad_player(d);
     }
     return bits;
@@ -896,7 +899,7 @@ static void hq_nav(unsigned nav) {
 }
 static int hq_menu_key(unsigned short code, int down) {
     if (g_hq.disabled) return 0;
-    if (down) [g_ov_keys_down addIndex:code]; else [g_ov_keys_down removeIndex:code];
+    if (down) [g_ov_keys_down addIndex:code];
     BOOL hot = code==g_ov_keys[0] || code==g_ov_keys[1];
     hq_phase was=g_hq.phase;
     if (down && hot) {
@@ -921,7 +924,7 @@ static void hq_poll(void) {
     int player, tap;
     unsigned buttons = hq_buttons(&player);
     if (buttons & HQ_HOME) g_ov_home_seen = YES;
-    if (g_hq.phase == HQ_SETTLE && g_ov_keys_down.count) buttons |= HQ_OTHER;
+    if (g_hq.phase == HQ_SETTLE && (g_ov_keys_down.count || (NSEvent.pressedMouseButtons & 1))) buttons |= HQ_OTHER;
     double now = CACurrentMediaTime();
     home_quit was = g_hq;
     unsigned nav = hq_step(&g_hq,now,buttons,&tap);
@@ -2170,7 +2173,10 @@ void front_run(void (*guest)(void)) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
             if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed
             if (e.type == NSEventTypeKeyDown && fn_shortcut(e)) return e;   // fn (Globe) + a letter is the system's (fn+F full screen, GitHub issue #873), not the game's F
-            if (hq_visible(g_hq.phase) && ((e.modifierFlags & (NSEventModifierFlagControl|NSEventModifierFlagOption)) == (NSEventModifierFlagControl|NSEventModifierFlagOption))) return e;   // VoiceOver
+            if (hq_visible(g_hq.phase) && ((e.modifierFlags & (NSEventModifierFlagControl|NSEventModifierFlagOption)) == (NSEventModifierFlagControl|NSEventModifierFlagOption))) {
+                if (e.type == NSEventTypeKeyUp) [g_ov_keys_down removeIndex:e.keyCode];
+                return e;   // VoiceOver takes the event, but a tracked key still needs its release
+            }
             if (!e.isARepeat) on_key(e, e.type == NSEventTypeKeyDown);
             return nil;   // Swallow it to avoid the system beep
         }];

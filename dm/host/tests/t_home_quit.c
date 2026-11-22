@@ -4,6 +4,20 @@
 int main(void) {
     home_quit q = {0};
     int tap;
+    for (int axis = 0; axis < 4; axis++) {
+        int32_t s[4] = {0};
+        s[axis] = axis & 1 ? -DM_STICK_MAX : DM_STICK_MAX;
+        assert(hq_stick_bits(s) == (axis == 0 ? HQ_RIGHT | HQ_OTHER : axis == 1 ? HQ_DOWN | HQ_OTHER : HQ_OTHER));
+        hq_open(&q, HQ_FULL);
+        hq_step(&q, 0, HQ_B | hq_stick_bits(s), &tap);
+        assert(q.phase == HQ_SETTLE);
+        s[axis] /= 4;   // B released, stick below the navigation threshold but not centered
+        hq_step(&q, .1, hq_stick_bits(s), &tap);
+        assert(q.phase == HQ_SETTLE);
+        s[axis] = DM_STICK_MAX / 20;
+        hq_step(&q, .2, hq_stick_bits(s), &tap);
+        assert(q.phase == HQ_IDLE);
+    }
     assert(!hq_step(&q, 1, HQ_HOME, &tap) && q.phase == HQ_HOLDING);
     assert(hq_ring(&q, 1.25) == .5);
     hq_step(&q, 1.49, 0, &tap);

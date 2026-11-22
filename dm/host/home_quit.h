@@ -1,6 +1,7 @@
 // Mac overlay input, independent of AppKit and controller APIs. Home menu
 // originally adapted from NX2Apple patch 0035 (MIT, Copyright 2026 LNPANDY and contributors).
 #pragma once
+#include "dm_input.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -10,6 +11,14 @@
 typedef enum { HQ_IDLE, HQ_HOLDING, HQ_QUICK, HQ_FULL, HQ_SETTLE, HQ_QUIT, HQ_PAUSED } hq_phase;
 enum { HQ_HOME = 1, HQ_PLUS = 2, HQ_A = 4, HQ_B = 8, HQ_Y = 16,
        HQ_LEFT = 32, HQ_RIGHT = 64, HQ_UP = 128, HQ_DOWN = 256, HQ_L = 512, HQ_R = 1024, HQ_OTHER = 2048 };
+// Leave a small neutral zone for drift; navigation still takes a deliberate tilt of the left stick.
+static inline unsigned hq_stick_bits(const int32_t s[4]) {
+    const int32_t neutral = DM_STICK_MAX / 20;
+    unsigned bits = (s[0] < -DM_STICK_MAX*HQ_STICK ? HQ_LEFT : 0) | (s[0] > DM_STICK_MAX*HQ_STICK ? HQ_RIGHT : 0) |
+        (s[1] > DM_STICK_MAX*HQ_STICK ? HQ_UP : 0) | (s[1] < -DM_STICK_MAX*HQ_STICK ? HQ_DOWN : 0);
+    for (int i = 0; i < 4; i++) if (s[i] < -neutral || s[i] > neutral) return bits | HQ_OTHER;
+    return bits;
+}
 enum { HQ_HUD, HQ_VOLUME, HQ_PADS, HQ_NETWORK, HQ_POWER };
 typedef struct {
     hq_phase phase;
