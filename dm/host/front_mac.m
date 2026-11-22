@@ -536,7 +536,7 @@ static void jc1_models_changed(void) { pads_changed(nil); }
 static NSTimer *g_hq_timer, *g_hud_timer;
 static NSView *g_hq_hold, *g_hq_view;
 static NSVisualEffectView *g_hq_blur;
-static NSTextField *g_hud_label;
+static DmFPSView *g_hud_label;
 static CAShapeLayer *g_hq_ring;
 static BOOL g_ov_fr;
 static BOOL g_ov_home_seen, g_ov_home_system, g_ov_help_once, g_ov_help_visible;
@@ -565,22 +565,19 @@ void front_frame_presented(void) {
 }
 static void hud_update(void) {
     static double prior;
-    static unichar history[8];
+    static NSMutableArray<NSNumber *> *history;
     double now = CACurrentMediaTime(), period = now - prior;
     if (period < .5) return;
     uint64_t frames = atomic_exchange_explicit(&g_hud_frames, 0, memory_order_relaxed);
     prior = now;
     if (!g_hud.preset || period > 2 || period <= 0) frames = 0;
     double fps = frames ? frames/period : 0, ms = fps ? 1000/fps : 0;
-    NSString *graph = nil;
+    if (!history) history=[NSMutableArray array];
     if (g_hud.preset == 3) {
-        static const unichar bars[] = {0x2581,0x2582,0x2583,0x2584,0x2585,0x2586,0x2587,0x2588};
-        memmove(history,history+1,sizeof history-sizeof *history);
-        history[7] = bars[(int)fmin(7, ms/5)];
-        NSUInteger oldest = 0; while (!history[oldest]) oldest++;
-        graph = [NSString stringWithCharacters:history+oldest length:8-oldest];
-    }
-    g_hud_label.stringValue = ov_fps_text(g_hud.preset,fps,ms,graph);
+        if (!frames) [history removeAllObjects];
+        else { if (history.count==16) [history removeObjectAtIndex:0]; [history addObject:@(ms)]; }
+    } else [history removeAllObjects];
+    ov_fps_sample(g_hud_label,fps,ms,history,g_ov_fr);
     hud_layout();
 }
 static void hud_layout(void) {
@@ -634,7 +631,7 @@ static void hq_start(void) {
     g_ov_game = [@"game-" stringByAppendingString:@(DM_GAME_ID)];
     g_hud_store = [[NSUserDefaults alloc] initWithSuiteName:@"org.nxnative.overlay"];
     g_hud = ov_hud_load(g_hud_store, g_ov_game);
-    g_hud_label = ov_fps_label(@"— FPS");
+    g_hud_label = ov_fps_view();
     [g_win.contentView addSubview:g_hud_label];
     hud_apply();
     NSString *cover = ov_env("DM_OVERLAY_COVER");
