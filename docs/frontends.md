@@ -76,6 +76,8 @@ The Mac overlay does not pause the game. By default, tap Home for the full overl
 
 **Quick access → Fullscreen / Window** takes effect immediately. **Game settings → Display** does the same: it toggles native fullscreen on the current screen, blocks guest input during the transition, and remembers the resulting mode for this game (ahead of `DM_FULLSCREEN` on future launches). **Quick access → HUD** configures Apple's Metal HUD ([details](reference/frame-rate.md#mac-in-game-performance-hud)).
 
+Set `DM_SCREEN` at launch to the display UUID string from `CGDisplayCreateUUIDFromDisplayID` (`CFUUIDCreateString`, case-insensitive; not a display number or name). It places the initial window before applying the saved window/fullscreen mode; it does not pin the window to that display. Unset or empty uses AppKit's main screen. An invalid or disconnected UUID also uses the main screen and logs the fallback.
+
 `DM_HOME_MENU=0` disables both overlays and releases Menu to the game. `DM_HOME_QUIT=0` disables controller holds for the overlay and removes **Quit** from both views; short Home and the keyboard shortcuts remain available. **Quit** always opens a confirmation with **Cancel** selected. As a limitation, all local pads share overlay input and are withheld from the game while it is open and until overlay controls are released.
 
 For localization, `DM_HOME_QUIT_TEXT` still uses lines 2–8 for confirmation title, warning, Quit, Cancel, Resume, launcher return and game title, respectively. Line 1 was the old two-second-quit instruction and is ignored. Built-in strings are French or English according to macOS's preferred language; empty or absent launcher lines retain those defaults.

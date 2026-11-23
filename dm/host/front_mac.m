@@ -14,6 +14,7 @@
 #import <GameController/GameController.h>
 #include "dm.h"
 #include "front_role.h"
+#include "screen_mac.h"
 #include "dm_input.h"
 #include "front.h"
 #include "hle.h"
@@ -2181,10 +2182,20 @@ void front_run(void (*guest)(void)) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        const char *screen_uuid = getenv("DM_SCREEN");
+        NSScreen *screen = screen_for_uuid(screen_uuid, NSScreen.screens);
+        if (!screen && screen_uuid && *screen_uuid)
+            LOG("front end: DM_SCREEN unavailable, using the main screen");
+        screen = screen ?: NSScreen.mainScreen;
         NSRect r = NSMakeRect(0, 0, 1280, 720);
         NSWindow *win = [[NSWindow alloc] initWithContentRect:r
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
-                                                      backing:NSBackingStoreBuffered defer:NO];
+                                                      backing:NSBackingStoreBuffered defer:NO screen:screen];
+        if (screen) {
+            NSRect area = screen.visibleFrame, frame = win.frame;
+            [win setFrameOrigin:NSMakePoint(NSMidX(area) - NSWidth(frame) / 2,
+                                            NSMidY(area) - NSHeight(frame) / 2)];
+        } else [win center];
         win.title = @(DM_GAME_NAME);   // the game profile's name (game name label)
         // Fullscreen: without FullScreenPrimary the green button only zooms the window. The present path already scales
         // the game picture to fit the drawable with black bars around it, so fullscreen keeps the game's aspect ratio.
@@ -2201,7 +2212,6 @@ void front_run(void (*guest)(void)) {
         picture.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
         picture.layer = g_layer; picture.wantsLayer = YES;
         [v addSubview:picture]; [(DmGameView *)v fitDrawable];
-        [win center];
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);
         g_win = win;
