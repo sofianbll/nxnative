@@ -25,11 +25,12 @@ typedef struct {
     hq_phase phase;
     double since;
     unsigned buttons, trigger;
-    int disabled, no_hold, swap;
+    int disabled, no_hold, menu_hold, swap;
     int selection, card, row, tab, confirm, advanced;
 } home_quit;
 
 static inline int hq_enabled(const char *env) { return !(env && !strcmp(env, "0")); }
+static inline int hq_captures_menu(const home_quit *q) { return q->menu_hold && !q->disabled && !q->no_hold; }
 static inline int hq_menu_enabled(const char *launcher, const char *menu) { return launcher && !strcmp(launcher, "1") && hq_enabled(menu); }
 static inline int hq_visible(hq_phase p) { return p == HQ_QUICK || p == HQ_FULL; }
 static inline int hq_blocks_input(hq_phase p) { return p != HQ_IDLE && p != HQ_HOLDING; }
@@ -69,13 +70,13 @@ static inline void hq_key_open(home_quit *q, hq_phase phase) {
 }
 
 // Returns new navigation presses only when the overlay was already open.
-// Menu short taps remain guest input; the host sends them when Menu is released.
+// With Menu hold enabled, the host sends short Menu taps to the guest on release.
 static inline unsigned hq_step(home_quit *q, double now, unsigned buttons, int *menu_tap) {
     unsigned down = buttons & ~q->buttons; q->buttons = buttons; *menu_tap = 0;
     if (q->disabled) return 0;
     switch (q->phase) {
     case HQ_IDLE: {
-        unsigned trigger = down & HQ_HOME ? HQ_HOME : down & HQ_PLUS && !q->no_hold ? HQ_PLUS : 0;
+        unsigned trigger = down & HQ_HOME ? HQ_HOME : down & HQ_PLUS && hq_captures_menu(q) ? HQ_PLUS : 0;
         if (trigger) { q->since = now; q->trigger = trigger; q->phase = HQ_HOLDING; }
         break;
     }

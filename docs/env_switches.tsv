@@ -324,8 +324,9 @@ DM_OPENSSL_ROOT	path	Reviewed static OpenSSL prefix for optional online/BCAT hel
 DM_OPMODE	player	The operation mode the game sees: `0` handheld, `1` console (default: the profile's `op_mode`, console unless set); read once at startup
 DM_OVERLAY_COVER	path	Optional absolute path to local cover art for the full Mac overlay (regular image file, at most 16 MiB)
 DM_OVERLAY_DATA	path	Launch-only absolute path to a read-only JSON snapshot for Profile, Friends and Achievements (see [Mac overlay](frontends.md#overlay-data)); absent tabs are hidden
-DM_OVERLAY_HOME_SWAP	player	Mac overlay at launch: `1` makes short Home open Quick access and long Home/Menu open the full overlay; `0` restores the default. When present it wins over the saved overlay preference at launch; otherwise that preference is used. The in-game setting can change it immediately in either case
+DM_OVERLAY_HOME_SWAP	player	Mac overlay at launch: `1` makes short Home open Quick access and long Home open the full overlay; `0` restores the default. Opt-in Menu hold follows the long Home gesture. When present it wins over the saved overlay preference at launch; otherwise that preference is used. The in-game setting can change it immediately in either case
 DM_OVERLAY_KEYS	player	Mac long-gesture and short-gesture equivalents respectively: two distinct F1–F12 names separated by a comma (default `F9,F10`), or `0` to disable. Their destinations follow `DM_OVERLAY_HOME_SWAP`
+DM_OVERLAY_MENU_HOLD	player	`1` lets a held controller Menu (+ / Options) open the Mac overlay like held Home; short Menu taps are then delivered on release. Off by default: Menu goes straight to the game
 DM_OVERLAY_PLAY_TIME	switch	Optional preformatted lifetime play time for the full Mac overlay
 DM_OVERLAY_TEST_ASSETS	test	`=<folder>` of stand-in images `bg.jpg` and `cover.png` read by the offline AppKit overlay PNG test
 DM_OVERLAY_TEST_SCREENS	test	`=<folder>` for `tests/t_game_overlay_mac.m` to write 1600×900 PNGs of Quick access cards and full overlay tabs over a synthetic backdrop (also set `DM_OVERLAY_TEST_ASSETS`)

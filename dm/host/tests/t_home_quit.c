@@ -45,11 +45,19 @@ int main(void) {
     hq_cancel(&q);
     assert(q.phase == HQ_SETTLE);
     hq_step(&q, 5, 0, &tap);
+    assert(!hq_captures_menu(&q));   // pass Menu through to the game by default
     hq_step(&q, 5.1, HQ_PLUS, &tap);
-    hq_step(&q, 5.5, 0, &tap);
+    hq_step(&q, 5.7, HQ_PLUS, &tap);
+    assert(q.phase == HQ_IDLE && !tap && hq_ring(&q, 5.7) == -1);
+    hq_step(&q, 5.8, 0, &tap);
+    assert(q.phase == HQ_IDLE && !tap);
+    q.menu_hold = 1;
+    assert(hq_captures_menu(&q));
+    hq_step(&q, 5.9, HQ_PLUS, &tap);
+    hq_step(&q, 6, 0, &tap);
     assert(tap && q.phase == HQ_IDLE);
-    hq_step(&q, 6, HQ_PLUS, &tap);
-    hq_step(&q, 6.5, 0, &tap);
+    hq_step(&q, 6.1, HQ_PLUS, &tap);
+    hq_step(&q, 6.7, 0, &tap);
     assert(!tap && q.phase == HQ_QUICK);   // release at threshold before timer delivered
     hq_key_open(&q, HQ_FULL);
     assert(q.phase == HQ_FULL);
@@ -58,7 +66,8 @@ int main(void) {
     assert(q.selection == 1);   // repeated shortcut does not reopen
     hq_key_open(&q, HQ_QUICK);
     assert(q.phase == HQ_QUICK && q.selection == 0);
-    q = (home_quit){.no_hold = 1};
+    q = (home_quit){.no_hold = 1, .menu_hold = 1};
+    assert(!hq_captures_menu(&q));
     hq_step(&q, 7, HQ_PLUS, &tap);
     assert(q.phase == HQ_IDLE);
     hq_step(&q, 7.1, HQ_HOME, &tap);
@@ -67,7 +76,8 @@ int main(void) {
     hq_step(&q, 8, HQ_HOME, &tap);
     hq_step(&q, 8.2, 0, &tap);
     assert(q.phase == HQ_FULL);
-    q = (home_quit){.disabled = 1};
+    q = (home_quit){.disabled = 1, .menu_hold = 1};
+    assert(!hq_captures_menu(&q));
     hq_key_open(&q, HQ_QUICK);
     hq_step(&q, 9, HQ_HOME | HQ_PLUS, &tap);
     assert(q.phase == HQ_IDLE);
@@ -76,7 +86,7 @@ int main(void) {
     assert(hq_short(&q)==HQ_QUICK && hq_long(&q)==HQ_FULL);
     hq_step(&q,10,HQ_HOME,&tap); hq_step(&q,10.1,0,&tap); assert(q.phase==HQ_QUICK);
     q.phase=HQ_IDLE; hq_step(&q,11,HQ_HOME,&tap); hq_step(&q,11.6,HQ_HOME,&tap); assert(q.phase==HQ_FULL);
-    q.phase=HQ_IDLE; hq_step(&q,12,0,&tap); hq_step(&q,12.1,HQ_PLUS,&tap); hq_step(&q,12.7,HQ_PLUS,&tap); assert(q.phase==HQ_FULL && !tap);
+    q.phase=HQ_IDLE; q.menu_hold=1; hq_step(&q,12,0,&tap); hq_step(&q,12.1,HQ_PLUS,&tap); hq_step(&q,12.7,HQ_PLUS,&tap); assert(q.phase==HQ_FULL && !tap);
     hq_key_open(&q,hq_short(&q)); assert(q.phase==HQ_QUICK);
     hq_key_open(&q,hq_long(&q)); assert(q.phase==HQ_FULL);
     q.phase=HQ_DISPLAYING; hq_cancel(&q);

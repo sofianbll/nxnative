@@ -205,7 +205,7 @@ static int g_hq_arcane, g_hq_pulse = -1, g_ov_menu_player = -1;
 static int32_t pad_axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * DM_STICK_MAX); }
 // A controller's state for player p, GameController or raw HID: a pressed button or a stick past 15% hides the pointer (cursor_hide_for_input), a resting stick's drift does not
 static void pad_set(int p, uint64_t m, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
-    if (!g_hq.disabled && !g_hq.no_hold) {
+    if (hq_captures_menu(&g_hq)) {
         if (g_hq.phase == HQ_HOLDING && g_hq.trigger == HQ_PLUS && g_ov_menu_player < 0 && (m & DM_BTN_PLUS))
             g_ov_menu_player = p;   // Menu itself can be the player's first press to join
         m &= ~DM_BTN_PLUS;
@@ -591,6 +591,8 @@ static NSDictionary *ov_load_data(NSString *path) {
 static void hq_start(void) {
     g_hq.disabled = !hq_enabled(getenv("DM_HOME_MENU"));
     g_hq.no_hold = !hq_enabled(getenv("DM_HOME_QUIT"));
+    const char *menu_hold = getenv("DM_OVERLAY_MENU_HOLD");
+    g_hq.menu_hold = menu_hold && !strcmp(menu_hold, "1");
     g_hq_arcane = hq_menu_enabled(getenv("DM_HOME_MENU_LAUNCHER"), getenv("DM_HOME_MENU"));
     g_ov_fr = [NSLocale.preferredLanguages.firstObject hasPrefix:@"fr"];
     g_ov_keys_down = [NSMutableIndexSet new];
